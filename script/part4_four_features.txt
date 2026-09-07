@@ -1,0 +1,9 @@
+Infinite scroll removes the page break. There's always more, so there's never a moment where the content itself says "that's it."
+
+Autoplay goes one step further — it doesn't wait for you to choose the next thing, it just starts it. And this one has actually been tested directly: in a 2025 experiment, researchers had real streaming users turn autoplay off. The result wasn't small — people watched measurably less per day, and their sessions got shorter, simply because there was now a moment where they had to actively choose to keep going instead of doing nothing and continuing anyway.
+
+Personalization narrows the feed to what already keeps you watching. This one gets overstated a lot — you'll hear claims that the algorithm is "radicalizing" people or dragging them down ideological rabbit holes. Large recent studies testing this directly found the effect is much smaller than the popular story suggests. What personalization reliably does is quieter and less dramatic: it keeps serving you the version of "interesting" that has worked on you before, so the feed rarely gives you a natural reason to leave it.
+
+Notifications pull you back in even when you've already left. A single notification has been measured to disrupt your attention for several seconds — not because of what it says, but because your brain treats anything personally relevant as something it has to check right now.
+
+None of these four features is the "cause" on its own. What they share is the same underlying job: remove one more reason for you to stop.

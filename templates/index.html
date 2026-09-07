@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Hidden Why — Automation Studio UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">👁️</div>
+        <div class="brand-text">
+          <h1>The Hidden Why</h1>
+          <span>Automation Studio</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="dashboard">
+          <span class="icon">📊</span> Tổng Quan
+        </button>
+        <button class="nav-item" data-tab="scripts">
+          <span class="icon">📝</span> Kịch Bản (Scripts)
+        </button>
+        <button class="nav-item" data-tab="voice">
+          <span class="icon">🎙️</span> Phase 1: Tạo Giọng Đọc
+        </button>
+        <button class="nav-item" data-tab="prompts">
+          <span class="icon">🎨</span> Phase 2: Visuals & Prompts AI
+        </button>
+        <button class="nav-item" data-tab="video">
+          <span class="icon">🎬</span> Phase 3: Ghép Video
+        </button>
+        <button class="nav-item" data-tab="youtube">
+          <span class="icon">🚀</span> Phase 4: Upload YouTube
+        </button>
+      </nav>
+
+      <div class="status-summary">
+        <h3>Hệ Thống API</h3>
+        <div class="status-badge" id="badge-eleven">ElevenLabs: <span>Checking...</span></div>
+        <div class="status-badge" id="badge-gemini">Gemini API: <span>Checking...</span></div>
+        <div class="status-badge" id="badge-youtube">YouTube OAuth: <span>Checking...</span></div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="content-area">
+
+      <!-- Header -->
+      <header class="top-header">
+        <h2 id="page-title">Dashboard Tổng Quan</h2>
+        <div class="header-actions">
+          <button class="btn btn-secondary" onclick="refreshStatus()">🔄 Làm mới dữ liệu</button>
+        </div>
+      </header>
+
+      <!-- TAB 1: DASHBOARD -->
+      <section id="tab-dashboard" class="tab-content active">
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-icon purple">📄</div>
+            <div class="metric-info">
+              <span class="metric-value" id="val-scripts">0</span>
+              <span class="metric-label">Phân Đoạn Kịch Bản</span>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon cyan">🔊</div>
+            <div class="metric-info">
+              <span class="metric-value" id="val-audios">0</span>
+              <span class="metric-label">File Audio MP3</span>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon amber">🖼️</div>
+            <div class="metric-info">
+              <span class="metric-value" id="val-images">0</span>
+              <span class="metric-label">Hình Ảnh Đã Nạp</span>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon emerald">🎬</div>
+            <div class="metric-info">
+              <span class="metric-value" id="val-videos">0</span>
+              <span class="metric-label">Video MP4 Hoàn Chỉnh</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="pipeline-flow">
+          <h3>Quy Trình Tự Động Hóa 4 Phase</h3>
+          <div class="steps-container">
+            <div class="step-card" onclick="switchTab('voice')">
+              <div class="step-num">1</div>
+              <h4>Phase 1: Giọng Đọc</h4>
+              <p>Tạo Audio ElevenLabs chất lượng cao với 1 click</p>
+            </div>
+            <div class="step-card" onclick="switchTab('prompts')">
+              <div class="step-num">2</div>
+              <h4>Phase 2: Visual AI</h4>
+              <p>Gemini viết prompt + Veo 3 sinh clip B-roll</p>
+            </div>
+            <div class="step-card" onclick="switchTab('video')">
+              <div class="step-num">3</div>
+              <h4>Phase 3: Ghép Video</h4>
+              <p>FFmpeg tự động ghép Audio + B-roll thành MP4</p>
+            </div>
+            <div class="step-card" onclick="switchTab('youtube')">
+              <div class="step-num">4</div>
+              <h4>Phase 4: Upload YouTube</h4>
+              <p>Tự động tải video lên YouTube ở chế độ Riêng Tư</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: SCRIPTS -->
+      <section id="tab-scripts" class="tab-content">
+        <div class="scripts-layout">
+          <div class="scripts-sidebar">
+            <div class="section-title">
+              <h3>Danh Sách Section</h3>
+              <button class="btn btn-sm btn-primary" onclick="addNewScriptPrompt()">+ Thêm File</button>
+            </div>
+            <div class="file-list" id="script-file-list">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+          <div class="script-editor-container">
+            <div class="editor-header">
+              <input type="text" id="editor-filename" placeholder="Tên file (e.g. part0_cold_open.txt)" readonly>
+              <button class="btn btn-primary" onclick="saveCurrentScript()">💾 Lưu Kịch Bản</button>
+            </div>
+            <textarea id="editor-content" placeholder="Nhập hoặc dán nội dung kịch bản tại đây..."></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: VOICE -->
+      <section id="tab-voice" class="tab-content">
+        <div class="card">
+          <h3>Phase 1 — ElevenLabs Voice Generator</h3>
+          <p class="subtitle">Sinh giọng đọc truyền cảm cho kênh "The Hidden Why". Đã kiểm tra không tốn trùng credit
+            nếu file audio đã tồn tại.</p>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>Giọng Đọc Đã Chọn (Voice ID):</label>
+              <select id="select-voice">
+                <option value="JBFqnCBsd6RMkjVDRZzb" selected>George — Warm, Captivating Storyteller (Đề Xuất)</option>
+                <option value="cjVigY5qzO86Huf0OWal">Eric — Smooth, Trustworthy</option>
+                <option value="onwK4e9ZLuTAKqWW03F9">Daniel — Steady Broadcaster</option>
+                <option value="IKne3meq5aSn9XLyUdCD">Charlie — Deep, Confident</option>
+                <option value="XrExE9yKIg1WjnnlVkGX">Matilda — Professional (Nữ)</option>
+              </select>
+            </div>
+            <div class="form-group inline-checkbox">
+              <label><input type="checkbox" id="check-force"> Ghi đè toàn bộ (Force Regenerate)</label>
+            </div>
+          </div>
+
+          <button class="btn btn-lg btn-success" onclick="triggerGenerateAudio()">🎙️ Bắt Đầu Sinh Giọng Đọc (Generate
+            Voice)</button>
+        </div>
+
+        <div class="card margin-top">
+          <h3>Thư viện Audio MP3 Đã Sinh</h3>
+          <div class="audio-grid" id="audio-list-grid">
+            <!-- Audio players populated dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: PROMPTS -->
+      <section id="tab-prompts" class="tab-content">
+        <div class="card">
+          <h3>Phase 2a — Gemini Visual Prompt Generator</h3>
+          <p class="subtitle">Gemini API tự động phân tích kịch bản và viết mô tả hình ảnh điện ảnh (text prompts) cho
+            từng phân đoạn video.</p>
+          <button class="btn btn-lg btn-purple" onclick="triggerGeneratePrompts()">🤖 Sinh Prompts (Bước 1)</button>
+        </div>
+
+        <div class="card margin-top">
+          <h3>Phase 2b — Tự Động Tạo Ảnh từ Prompts (Imagen API)</h3>
+          <p class="subtitle">Sau khi có Prompts, dùng Gemini Imagen API để tự động vẽ ảnh minh họa cho từng phần — lưu
+            vào <code>./images/</code> để ghép video.</p>
+          <div
+            style="background:#0c1220;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#93c5fd;">
+            <strong>⚠️ Lưu ý:</strong> Imagen API yêu cầu Google Cloud Project có bật Vertex AI / Imagen. Nếu chưa có
+            access, bạn có thể tự upload ảnh thủ công vào thư mục <code>./images/</code> với tên file trùng với tên
+            section (ví dụ: <code>part0_cold_open.png</code>) — script ghép video vẫn chạy bình thường.
+          </div>
+          <button class="btn btn-lg btn-cyan" onclick="triggerGenerateImages()">🖼️ Tạo Ảnh Tự Động (Bước 2)</button>
+        </div>
+
+        <div class="card margin-top">
+          <div class="card-header">
+            <h3>Danh Sách Visual Prompts Đã Sinh</h3>
+            <button class="btn btn-sm btn-secondary" onclick="copyPromptsToClipboard()">📋 Copy Toàn Bộ</button>
+          </div>
+          <pre id="prompts-output-area" class="code-box">Nhấn 'Sinh Prompts' để bắt đầu...</pre>
+        </div>
+      </section>
+
+
+      <!-- TAB 5: VIDEO -->
+      <section id="tab-video" class="tab-content">
+        <div class="card">
+          <h3>Phase 2c — Tự Động Sinh B-roll Footage (Google Veo 3)</h3>
+          <p class="subtitle">Dùng <strong>Veo 3</strong> để sinh clip video ~7 giây cho từng phân đoạn. Tự động
+            fallback sang Veo 2 nếu chưa có access. Mỗi clip mất ~1-3 phút.</p>
+          <div
+            style="background:#0c1220;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#93c5fd;">
+            <strong>Thứ tự ưu tiên khi ghép:</strong>
+            &nbsp; 1. <strong style="color:#06b6d4;">Veo footage</strong> (./footage/*.mp4)
+            &nbsp; 2. <strong style="color:#f59e0b;">Ảnh tĩnh</strong> (./images/*.png)
+            &nbsp; 3. <strong style="color:#64748b;">Dark poster tự tạo</strong>
+          </div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+            <button class="btn btn-lg btn-purple" onclick="triggerGenerateFootage(false)">🎥 Tạo B-roll Footage (Veo
+              3)</button>
+            <button class="btn btn-sm btn-secondary" onclick="triggerGenerateFootage(true)">↺ Force Regenerate</button>
+          </div>
+        </div>
+
+        <div class="card margin-top">
+          <h3>Phase 3 — Ghép Video Hoàn Chỉnh (FFmpeg Assembler)</h3>
+          <p class="subtitle">Lấy Audio + Footage/Ảnh của từng section, ghép thành 1 file <code>final_video.mp4</code>
+            hoàn chỉnh.</p>
+          <button class="btn btn-lg btn-cyan" onclick="triggerBuildVideo()">🎬 Ghép Video (Assemble MP4)</button>
+        </div>
+
+        <div class="card margin-top" id="video-preview-card">
+          <h3>Xem Trước Video (Video Preview)</h3>
+          <div class="video-preview-container">
+            <video id="main-video-player" controls
+              style="width: 100%; max-height: 450px; border-radius: 8px; background: #000;">
+              <source src="/media/video/final_video.mp4" type="video/mp4">
+              Chưa có file final_video.mp4. Hãy nhấn "Ghép Video" sau khi đã có audio và footage/ảnh.
+            </video>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- TAB 6: YOUTUBE -->
+      <section id="tab-youtube" class="tab-content">
+        <div class="card">
+          <h3>Phase 4 — Upload YouTube (OAuth2 Private Default)</h3>
+          <p class="subtitle">Tải video <code>final_video.mp4</code> lên YouTube. Mặc định luôn ở chế độ Riêng tư
+            (PRIVATE) an toàn.</p>
+
+          <div class="form-group">
+            <label>Tiêu Đề Video (Title):</label>
+            <input type="text" id="yt-title" value="Why You Can't Stop Scrolling | The Hidden Why">
+          </div>
+
+          <div class="form-group">
+            <label>Mô Tả Video (Description):</label>
+            <textarea id="yt-desc" rows="4">An exploration into the psychology and interface design that keeps us scrolling late at night.
+
+Subscribe to The Hidden Why for more psychology & tech explainers.</textarea>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>Quyền Riêng Tư (Privacy):</label>
+              <select id="yt-privacy">
+                <option value="private" selected>PRIVATE (Riêng tư - An toàn nhất)</option>
+                <option value="unlisted">UNLISTED (Không công khai)</option>
+                <option value="public">PUBLIC (Công khai)</option>
+              </select>
+            </div>
+          </div>
+
+          <button class="btn btn-lg btn-danger" onclick="triggerUploadYoutube()">🚀 Upload Lên YouTube Ngay</button>
+        </div>
+      </section>
+
+      <!-- BOTTOM LOG CONSOLE -->
+      <div class="console-drawer">
+        <div class="console-header">
+          <span>📟 Console Log Tiến Trình (Terminal Logs)</span>
+          <button class="btn-clear" onclick="clearLogs()">Xóa log</button>
+        </div>
+        <div class="console-body" id="console-logs">
+          <div class="log-line info">[SYSTEM] Studio UI đã sẵn sàng làm việc.</div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>

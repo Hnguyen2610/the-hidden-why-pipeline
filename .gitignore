@@ -1,0 +1,25 @@
+# Secrets & Environment variables
+.env
+client_secret*.json
+token.json
+
+
+# Python output & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Audio, Footage, Video & Image outputs
+audio/*.mp3
+images/*.png
+images/*.jpg
+footage/*.mp4
+video/*.mp4
+visual_prompts_gemini.txt
+
+# OS files
+.DS_Store
+Thumbs.db
