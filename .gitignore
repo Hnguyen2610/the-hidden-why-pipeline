@@ -12,13 +12,17 @@ __pycache__/
 venv/
 ENV/
 
-# Audio, Footage, Video & Image outputs
+# Audio, Footage, Video & Image outputs (legacy single-project layout)
 audio/*.mp3
 images/*.png
 images/*.jpg
 footage/*.mp4
 video/*.mp4
 visual_prompts_gemini.txt
+
+# All video project content (scripts, audio, images, footage, video) is
+# personal per-user data, not repo content - never committed, any project name.
+projects/
 
 # OS files
 .DS_Store

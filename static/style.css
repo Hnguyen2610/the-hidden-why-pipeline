@@ -512,10 +512,30 @@ body {
 /* Console Drawer */
 .console-drawer {
   height: 160px;
+  min-height: 40px;
+  max-height: 80vh;
   background: #04060C;
   border-top: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.console-resize-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 10;
+}
+
+.console-resize-handle:hover,
+.console-drawer.resizing .console-resize-handle {
+  background: var(--accent-cyan, #38bdf8);
+  opacity: 0.4;
 }
 
 .console-header {

@@ -107,8 +107,9 @@ def main():
         print("[ERROR] GEMINI_API_KEY is not set in .env")
         sys.exit(1)
 
-    prompts_file = os.path.abspath("visual_prompts_gemini.txt")
-    images_dir = os.path.abspath("./images")
+    proj_dir = os.getenv("PROJECT_DIR", ".")
+    prompts_file = os.path.abspath(os.path.join(proj_dir, "visual_prompts_gemini.txt"))
+    images_dir = os.path.abspath(os.path.join(proj_dir, "images"))
     os.makedirs(images_dir, exist_ok=True)
 
     if not os.path.exists(prompts_file):

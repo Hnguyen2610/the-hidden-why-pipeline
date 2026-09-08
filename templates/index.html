@@ -42,6 +42,9 @@
         <button class="nav-item" data-tab="video">
           <span class="icon">🎬</span> Phase 3: Ghép Video
         </button>
+        <button class="nav-item" data-tab="shorts">
+          <span class="icon">📱</span> Shorts (Dọc)
+        </button>
         <button class="nav-item" data-tab="youtube">
           <span class="icon">🚀</span> Phase 4: Upload YouTube
         </button>
@@ -59,8 +62,20 @@
     <main class="content-area">
 
       <!-- Header -->
-      <header class="top-header">
+      <header class="top-header"
+        style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
         <h2 id="page-title">Dashboard Tổng Quan</h2>
+
+        <div class="project-selector-container"
+          style="display:flex; align-items:center; gap:8px; background:#0f172a; padding:6px 14px; border-radius:10px; border:1px solid #334155;">
+          <span style="font-weight:600; color:#38bdf8; font-size:14px;">🎬 Chọn Dự Án Video:</span>
+          <select id="select-project" onchange="switchProject(this.value)"
+            style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:6px 10px; border-radius:6px; font-weight:600; cursor:pointer;">
+            <!-- Rendered dynamically -->
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="createNewProjectPrompt()">+ Tạo Video Mới</button>
+        </div>
+
         <div class="header-actions">
           <button class="btn btn-secondary" onclick="refreshStatus()">🔄 Làm mới dữ liệu</button>
         </div>
@@ -110,7 +125,7 @@
             <div class="step-card" onclick="switchTab('prompts')">
               <div class="step-num">2</div>
               <h4>Phase 2: Visual AI</h4>
-              <p>Gemini viết prompt + Veo 3 sinh clip B-roll</p>
+              <p>Gemini viết prompt + Pexels tải clip B-roll</p>
             </div>
             <div class="step-card" onclick="switchTab('video')">
               <div class="step-num">3</div>
@@ -128,6 +143,18 @@
 
       <!-- TAB 2: SCRIPTS -->
       <section id="tab-scripts" class="tab-content">
+        <div class="card" style="margin-bottom: 20px;">
+          <h3>✨ Tạo Video Mới — Dán Toàn Bộ Kịch Bản</h3>
+          <p class="subtitle">Dán toàn bộ bài kịch bản mới của bạn vào đây. Hệ thống sẽ <strong>tự động xóa dữ liệu
+              cũ</strong> và <strong>tự tách thành từng Section (Part 0, Part 1...)</strong> chuẩn chuẩn bị cho các
+            Phase tiếp theo.</p>
+          <textarea id="full-script-input"
+            style="width:100%; height:120px; background:#0c1220; color:#f8fafc; border:1px solid #1e3a5f; border-radius:8px; padding:12px; font-family:monospace; margin-bottom:12px;"
+            placeholder="Dán toàn bộ kịch bản video mới của bạn vào đây (Hệ thống tự nhận diện các đoạn văn để chia section)..."></textarea>
+          <button class="btn btn-lg btn-purple" onclick="triggerAutoSplitScript()">⚡ Tách Kịch Bản & Khởi Tạo Video
+            Mới</button>
+        </div>
+
         <div class="scripts-layout">
           <div class="scripts-sidebar">
             <div class="section-title">
@@ -154,6 +181,13 @@
           <h3>Phase 1 — ElevenLabs Voice Generator</h3>
           <p class="subtitle">Sinh giọng đọc truyền cảm cho kênh "The Hidden Why". Đã kiểm tra không tốn trùng credit
             nếu file audio đã tồn tại.</p>
+          <div
+            style="background:#0c1220;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#93c5fd;">
+            <strong>⚠️ Fallback tự động:</strong> Trước khi chạy, hệ thống ước lượng tổng số ký tự cần cho <strong>cả
+            video</strong> và kiểm tra quota ElevenLabs còn lại. Nếu không đủ, toàn bộ video sẽ dùng
+            <strong>edge-tts (miễn phí, không giới hạn)</strong> thay vì ElevenLabs — đảm bảo 1 video chỉ dùng
+            1 giọng đọc, không bị lẫn giọng giữa các phần. Theo dõi Console Log để biết đang dùng engine nào.
+          </div>
 
           <div class="form-row">
             <div class="form-group">
@@ -218,19 +252,18 @@
       <!-- TAB 5: VIDEO -->
       <section id="tab-video" class="tab-content">
         <div class="card">
-          <h3>Phase 2c — Tự Động Sinh B-roll Footage (Google Veo 3)</h3>
-          <p class="subtitle">Dùng <strong>Veo 3</strong> để sinh clip video ~7 giây cho từng phân đoạn. Tự động
-            fallback sang Veo 2 nếu chưa có access. Mỗi clip mất ~1-3 phút.</p>
+          <h3>Phase 2c — Tự Động Sinh B-roll Footage (Pexels Stock Video)</h3>
+          <p class="subtitle">Tải clip stock video HD miễn phí từ <strong>Pexels</strong> khớp với nội dung từng
+            phân đoạn. Cần <code>PEXELS_API_KEY</code> trong .env.</p>
           <div
             style="background:#0c1220;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin-bottom:14px;font-size:12px;color:#93c5fd;">
             <strong>Thứ tự ưu tiên khi ghép:</strong>
-            &nbsp; 1. <strong style="color:#06b6d4;">Veo footage</strong> (./footage/*.mp4)
+            &nbsp; 1. <strong style="color:#06b6d4;">Pexels footage</strong> (./footage/*.mp4)
             &nbsp; 2. <strong style="color:#f59e0b;">Ảnh tĩnh</strong> (./images/*.png)
             &nbsp; 3. <strong style="color:#64748b;">Dark poster tự tạo</strong>
           </div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-            <button class="btn btn-lg btn-purple" onclick="triggerGenerateFootage(false)">🎥 Tạo B-roll Footage (Veo
-              3)</button>
+            <button class="btn btn-lg btn-purple" onclick="triggerGenerateFootage(false)">🎥 Tạo B-roll Footage (Pexels)</button>
             <button class="btn btn-sm btn-secondary" onclick="triggerGenerateFootage(true)">↺ Force Regenerate</button>
           </div>
         </div>
@@ -250,6 +283,32 @@
               <source src="/media/video/final_video.mp4" type="video/mp4">
               Chưa có file final_video.mp4. Hãy nhấn "Ghép Video" sau khi đã có audio và footage/ảnh.
             </video>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- TAB SHORTS -->
+      <section id="tab-shorts" class="tab-content">
+        <div class="card">
+          <h3>✂️ Cắt Short từ Video Đã Có</h3>
+          <p class="subtitle">Chọn 1 hoặc nhiều section <strong>đã có audio</strong> (và tốt nhất là đã có footage)
+            để dựng thành 1 video Shorts khổ dọc 1080x1920 riêng — dùng lại đúng audio + footage đã tạo (footage
+            ngang sẽ được crop giữa khung cho vừa khổ dọc), không tải lại gì mới.</p>
+          <div id="shorts-section-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:14px; max-height:260px; overflow-y:auto; background:#0c1220; border:1px solid #1e3a5f; border-radius:8px; padding:12px;">
+            <span style="color:#64748b;">Đang tải danh sách section...</span>
+          </div>
+          <div class="form-group" style="margin-bottom:14px;">
+            <label>Tên Short (không dấu, không khoảng trắng):</label>
+            <input type="text" id="short-name-input" placeholder="vd: hook_intro">
+          </div>
+          <button class="btn btn-lg btn-purple" onclick="triggerCreateShort()">✂️ Tạo Short Từ Section Đã Chọn</button>
+        </div>
+
+        <div class="card margin-top">
+          <h3>📱 Danh Sách Shorts Đã Tạo</h3>
+          <div id="shorts-list-container" style="display:flex; flex-direction:column; gap:10px;">
+            <span style="color:#64748b;">Chưa có Short nào.</span>
           </div>
         </div>
       </section>
@@ -290,7 +349,8 @@ Subscribe to The Hidden Why for more psychology & tech explainers.</textarea>
       </section>
 
       <!-- BOTTOM LOG CONSOLE -->
-      <div class="console-drawer">
+      <div class="console-drawer" id="console-drawer">
+        <div class="console-resize-handle" id="console-resize-handle"></div>
         <div class="console-header">
           <span>📟 Console Log Tiến Trình (Terminal Logs)</span>
           <button class="btn-clear" onclick="clearLogs()">Xóa log</button>

@@ -2,6 +2,8 @@ let currentScriptFilename = "";
 
 document.addEventListener("DOMContentLoaded", () => {
     setupTabs();
+    setupConsoleResize();
+    loadProjects();
     refreshStatus();
     loadScripts();
     loadPrompts();
@@ -9,6 +11,130 @@ document.addEventListener("DOMContentLoaded", () => {
     // Auto-refresh status and log stream every 2.5s
     setInterval(refreshStatus, 2500);
 });
+
+function setupConsoleResize() {
+    const drawer = document.getElementById("console-drawer");
+    const handle = document.getElementById("console-resize-handle");
+    if (!drawer || !handle) return;
+
+    try {
+        const savedHeight = localStorage.getItem("consoleDrawerHeight");
+        if (savedHeight) drawer.style.height = savedHeight + "px";
+    } catch (err) { /* localStorage unavailable, ignore */ }
+
+    let dragging = false;
+    let startY = 0;
+    let startHeight = 0;
+
+    handle.addEventListener("mousedown", (e) => {
+        dragging = true;
+        startY = e.clientY;
+        startHeight = drawer.getBoundingClientRect().height;
+        drawer.classList.add("resizing");
+        document.body.style.userSelect = "none";
+        e.preventDefault();
+    });
+
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const delta = startY - e.clientY;
+        const newHeight = Math.min(Math.max(startHeight + delta, 40), window.innerHeight * 0.8);
+        drawer.style.height = newHeight + "px";
+    });
+
+    document.addEventListener("mouseup", () => {
+        if (!dragging) return;
+        dragging = false;
+        drawer.classList.remove("resizing");
+        document.body.style.userSelect = "";
+        try {
+            localStorage.setItem("consoleDrawerHeight", Math.round(drawer.getBoundingClientRect().height));
+        } catch (err) { /* localStorage unavailable, ignore */ }
+    });
+}
+
+async function loadProjects() {
+    try {
+        const res = await fetch("/api/projects");
+        const data = await res.json();
+
+        const selectEl = document.getElementById("select-project");
+        if (!selectEl) return;
+
+        selectEl.innerHTML = "";
+        data.projects.forEach(p => {
+            const opt = document.createElement("option");
+            opt.value = p;
+            opt.textContent = p.replace(/_/g, " ");
+            if (p === data.active_project) {
+                opt.selected = true;
+            }
+            selectEl.appendChild(opt);
+        });
+    } catch (err) {
+        console.error("Error loading projects:", err);
+    }
+}
+
+async function switchProject(projectName) {
+    try {
+        const res = await fetch("/api/projects/switch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: projectName })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            clearScriptEditor();
+            refreshStatus();
+            loadScripts();
+            loadPrompts();
+        } else {
+            alert("Lỗi đổi dự án: " + data.error);
+        }
+    } catch (err) {
+        alert("Lỗi: " + err);
+    }
+}
+
+function clearScriptEditor() {
+    currentScriptFilename = "";
+    const filenameEl = document.getElementById("editor-filename");
+    const contentEl = document.getElementById("editor-content");
+    if (filenameEl) filenameEl.value = "";
+    if (contentEl) contentEl.value = "";
+}
+
+async function createNewProjectPrompt() {
+    const rawName = prompt("Nhập tên Video / Dự Án Mới (VD: Video 2 - Dopamine Detox):");
+    if (!rawName || !rawName.trim()) return;
+
+    const vertical = confirm(
+        "Tạo dạng YouTube Shorts (khổ dọc 9:16)?\n\n" +
+        "OK = Shorts (dọc)\nHủy = Video thường (ngang)"
+    );
+
+    try {
+        const res = await fetch("/api/projects/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: rawName.trim(), vertical })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert("🎉 " + data.message);
+            clearScriptEditor();
+            await loadProjects();
+            refreshStatus();
+            loadScripts();
+            loadPrompts();
+        } else {
+            alert("Lỗi: " + data.error);
+        }
+    } catch (err) {
+        alert("Lỗi: " + err);
+    }
+}
 
 function setupTabs() {
     const navItems = document.querySelectorAll(".nav-item");
@@ -35,8 +161,9 @@ function switchTab(tabName) {
         dashboard: "Dashboard Tổng Quan",
         scripts: "Quản Lý Kịch Bản (Script Editor)",
         voice: "Phase 1: Tạo Giọng Đọc (ElevenLabs)",
-        prompts: "Phase 2: Visuals & Prompts AI (Gemini & Veo 3)",
+        prompts: "Phase 2: Visuals & Prompts AI (Gemini & Pexels)",
         video: "Phase 3: Ghép Video (FFmpeg Assembler)",
+        shorts: "Shorts — Cắt Video Dọc (9:16)",
         youtube: "Phase 4: Upload YouTube (OAuth2 Private)"
     };
     if (pageTitle && titles[tabName]) {
@@ -45,6 +172,10 @@ function switchTab(tabName) {
 
     if (tabName === "scripts") loadScripts();
     if (tabName === "prompts") loadPrompts();
+    if (tabName === "shorts") {
+        loadShortsSections();
+        loadShortsList();
+    }
 }
 
 async function refreshStatus() {
@@ -188,6 +319,37 @@ async function saveCurrentScript() {
     }
 }
 
+async function triggerAutoSplitScript() {
+    const fullScript = document.getElementById("full-script-input").value;
+    if (!fullScript || !fullScript.trim()) {
+        alert("Vui lòng dán kịch bản video mới của bạn vào ô văn bản!");
+        return;
+    }
+
+    if (!confirm("Hành động này sẽ xóa dữ liệu video cũ để khởi tạo video mới. Bạn có chắc chắn muốn tiếp tục?")) {
+        return;
+    }
+
+    try {
+        const res = await fetch("/api/scripts/split-and-save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ full_script: fullScript })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert("✨ " + data.message);
+            document.getElementById("full-script-input").value = "";
+            clearScriptEditor();
+            loadScripts();
+        } else {
+            alert("Lỗi: " + data.error);
+        }
+    } catch (err) {
+        alert("Lỗi: " + err);
+    }
+}
+
 function addNewScriptPrompt() {
     const name = prompt("Nhập tên file kịch bản mới (e.g. part6_next.txt):");
     if (name) {
@@ -271,6 +433,87 @@ async function triggerBuildVideo() {
         alert("🎬 " + data.message + "\nHãy theo dõi log ở góc dưới màn hình.");
     } catch (err) {
         alert("Lỗi: " + err);
+    }
+}
+
+/* SHORTS (VERTICAL) */
+async function loadShortsSections() {
+    const container = document.getElementById("shorts-section-list");
+    if (!container) return;
+    try {
+        const res = await fetch("/api/shorts/sections");
+        const data = await res.json();
+        container.innerHTML = "";
+        if (!data.sections || data.sections.length === 0) {
+            container.innerHTML = '<span style="color:#64748b;">Chưa có section nào có audio. Tạo audio trước ở Phase 1.</span>';
+            return;
+        }
+        data.sections.forEach(sec => {
+            const row = document.createElement("label");
+            row.style.cssText = "display:flex; align-items:center; gap:8px; cursor:pointer; padding:4px 0;";
+            const footageTag = sec.has_footage
+                ? '<span style="color:#10b981; font-size:11px;">● có footage</span>'
+                : '<span style="color:#f59e0b; font-size:11px;">● chỉ có ảnh/poster</span>';
+            row.innerHTML = `
+                <input type="checkbox" value="${sec.name}" class="short-section-checkbox">
+                <span style="flex:1;">${sec.name}</span>
+                ${footageTag}
+            `;
+            container.appendChild(row);
+        });
+    } catch (err) {
+        container.innerHTML = '<span style="color:#f87171;">Lỗi tải danh sách section.</span>';
+    }
+}
+
+async function triggerCreateShort() {
+    const checked = Array.from(document.querySelectorAll(".short-section-checkbox:checked")).map(el => el.value);
+    if (checked.length === 0) {
+        alert("Vui lòng chọn ít nhất 1 section!");
+        return;
+    }
+    const name = document.getElementById("short-name-input").value.trim();
+
+    try {
+        const res = await fetch("/api/shorts/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sections: checked, name })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert("✂️ " + data.message + "\nTheo dõi log ở góc dưới màn hình, sẽ mất khoảng 1-2 phút.");
+            document.getElementById("short-name-input").value = "";
+        } else {
+            alert("Lỗi: " + data.error);
+        }
+    } catch (err) {
+        alert("Lỗi: " + err);
+    }
+}
+
+async function loadShortsList() {
+    const container = document.getElementById("shorts-list-container");
+    if (!container) return;
+    try {
+        const res = await fetch("/api/shorts/list");
+        const data = await res.json();
+        if (!data.shorts || data.shorts.length === 0) {
+            container.innerHTML = '<span style="color:#64748b;">Chưa có Short nào.</span>';
+            return;
+        }
+        container.innerHTML = "";
+        data.shorts.forEach(filename => {
+            const item = document.createElement("div");
+            item.style.cssText = "display:flex; align-items:center; gap:14px; background:#0c1220; border:1px solid #1e3a5f; border-radius:8px; padding:10px;";
+            item.innerHTML = `
+                <video src="/media/shorts/${filename}" controls style="width:120px; height:213px; border-radius:6px; background:#000; object-fit:cover;"></video>
+                <span style="font-weight:600;">${filename}</span>
+            `;
+            container.appendChild(item);
+        });
+    } catch (err) {
+        container.innerHTML = '<span style="color:#f87171;">Lỗi tải danh sách Shorts.</span>';
     }
 }
 

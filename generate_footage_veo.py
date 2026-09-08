@@ -207,8 +207,9 @@ def main():
         print("[ERROR] GEMINI_API_KEY is not set in .env")
         sys.exit(1)
 
-    prompts_file = os.path.abspath("visual_prompts_gemini.txt")
-    footage_dir = os.path.abspath("./footage")
+    proj_dir = os.getenv("PROJECT_DIR", ".")
+    prompts_file = os.path.abspath(os.path.join(proj_dir, "visual_prompts_gemini.txt"))
+    footage_dir = os.path.abspath(os.path.join(proj_dir, "footage"))
     os.makedirs(footage_dir, exist_ok=True)
 
     if not os.path.exists(prompts_file):
@@ -264,8 +265,21 @@ def main():
             print(f"  [DONE] Saved -> {section_name}.mp4 ({size_mb:.1f} MB)")
 
         except RuntimeError as e:
-            print(f"\n[ERROR] {e}")
-            print("[FALLBACK] This section will use a static image when building video.")
+            print(f"\n[VEO WARN] {e}")
+            print(f"[FALLBACK TO PEXELS HD B-ROLL] Downloading real HD video for {section_name}...")
+            try:
+                from generate_footage_pexels import search_and_download_pexels_video, DEFAULT_KEYWORDS
+                kw = DEFAULT_KEYWORDS.get(section_name, prompt_text[:50])
+                ok = search_and_download_pexels_video(kw, output_path, os.getenv("PEXELS_API_KEY", ""))
+                if ok:
+                    generated += 1
+                    size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                    print(f"  [DONE PEXELS] Saved -> {section_name}.mp4 ({size_mb:.1f} MB)")
+                else:
+                    print("  [FALLBACK] Static image / dark poster will be used when building video.")
+            except Exception as pex_err:
+                print(f"  [PEXELS ERR] {pex_err}")
+                print("  [FALLBACK] Static image / dark poster will be used when building video.")
 
     print("\n" + "=" * 65)
     print(f"[DONE] Generated {generated} clip(s), skipped {skipped}")

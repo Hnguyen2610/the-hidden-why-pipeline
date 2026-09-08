@@ -11,6 +11,7 @@ import argparse
 import os
 import re
 import sys
+import time
 import requests
 
 try:
@@ -37,40 +38,59 @@ def natural_sort_key(s: str):
 
 
 def parse_args():
+    proj_dir = os.getenv("PROJECT_DIR", ".")
+    default_script = os.path.join(proj_dir, "script")
+    default_out = os.path.join(proj_dir, "visual_prompts_gemini.txt")
+
     parser = argparse.ArgumentParser(
         description="Automatically generate visual image prompts from script files using Gemini API."
     )
     parser.add_argument(
         "--script-dir",
-        default="./script",
-        help="Directory containing script .txt files (default: ./script)",
+        default=default_script,
+        help="Directory containing script .txt files",
     )
     parser.add_argument(
         "--output",
         "-o",
-        default="visual_prompts_gemini.txt",
-        help="Output text file path for generated visual prompts (default: visual_prompts_gemini.txt)",
+        default=default_out,
+        help="Output text file path for generated visual prompts",
     )
     parser.add_argument(
         "--model",
-        default="gemini-2.5-flash",
-        help="Gemini API Model ID (default: gemini-2.5-flash, fallback: gemini-1.5-flash)",
+        default="gemini-3.5-flash",
+        help="Gemini API Model ID (default: gemini-3.5-flash, fallback: gemini-2.5-flash / gemini-1.5-flash)",
     )
     return parser.parse_args()
 
 
 def call_gemini_api(prompt_text: str, api_key: str, model_id: str) -> str:
-    """Call Gemini REST API generateContent endpoint."""
-    models_to_try = [model_id, "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    """Call Gemini REST API generateContent endpoint.
+
+    For each candidate model, transient failures (429 rate limit / 503
+    overloaded) are retried on the SAME model with backoff before falling
+    through to the next model — a temporarily overloaded model shouldn't
+    immediately be abandoned for a different (possibly weaker) one.
+    """
+    models_to_try = [model_id, "gemini-3.5-flash", "gemini-2.5-flash"]
     # De-duplicate while preserving order
     seen = set()
     models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
 
-    last_error = ""
+    errors = []
 
     for model in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
+        generation_config = {
+            "temperature": 0.7,
+            "maxOutputTokens": 3000,
+        }
+        if not model.startswith("gemini-1.5"):
+            # 2.5+ models spend part of maxOutputTokens on internal "thinking" by default.
+            # Disable it here since it isn't needed for a short formatting task, and was
+            # previously eating the whole token budget before any visible text was written.
+            generation_config["thinkingConfig"] = {"thinkingBudget": 0}
         payload = {
             "contents": [
                 {
@@ -79,14 +99,17 @@ def call_gemini_api(prompt_text: str, api_key: str, model_id: str) -> str:
                     ]
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 1000,
-            }
+            "generationConfig": generation_config,
         }
 
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
+            except requests.exceptions.RequestException as e:
+                errors.append(f"{model}: {e}")
+                break  # network-level issue, move on to the next model
+
             if response.status_code == 200:
                 data = response.json()
                 candidates = data.get("candidates", [])
@@ -94,16 +117,70 @@ def call_gemini_api(prompt_text: str, api_key: str, model_id: str) -> str:
                     parts = candidates[0].get("content", {}).get("parts", [])
                     if parts:
                         return parts[0].get("text", "").strip()
-            else:
-                last_error = f"HTTP {response.status_code}: {response.text}"
-        except Exception as e:
-            last_error = str(e)
+                errors.append(f"{model}: HTTP 200 but no usable content in response")
+                break
 
-    raise RuntimeError(f"Gemini API call failed across models. Last error: {last_error}")
+            if response.status_code in (429, 503) and attempt < max_attempts:
+                wait_seconds = 2 * attempt
+                print(f"\n[INFO] {model} returned {response.status_code} (temporarily overloaded/rate limited). "
+                      f"Retrying in {wait_seconds}s (attempt {attempt + 1}/{max_attempts})...")
+                time.sleep(wait_seconds)
+                continue
+
+            errors.append(f"{model}: HTTP {response.status_code}: {response.text[:200]}")
+            break
+
+    raise RuntimeError("Gemini API call failed across all models/attempts:\n" + "\n".join(errors))
 
 
-def generate_prompts_for_section(section_name: str, script_text: str, api_key: str, model_id: str) -> str:
-    """Construct prompt for Gemini to generate visual cues."""
+def call_groq_api(prompt_text: str, api_key: str, model_id: str) -> str:
+    """Call Groq's OpenAI-compatible chat completions API.
+
+    Used only as a fallback when Gemini fails entirely (all models/attempts
+    exhausted) — Groq is not required for normal operation.
+    """
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "temperature": 0.7,
+        "max_tokens": 3000,
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Groq API request failed: {e}")
+
+    if response.status_code == 200:
+        data = response.json()
+        choices = data.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+            if content:
+                return content.strip()
+        raise RuntimeError("Groq API: HTTP 200 but no usable content in response")
+
+    raise RuntimeError(f"Groq API HTTP {response.status_code}: {response.text[:200]}")
+
+
+def generate_prompts_for_section(
+    section_name: str,
+    script_text: str,
+    api_key: str,
+    model_id: str,
+    groq_key: "str | None" = None,
+    groq_model: str = "openai/gpt-oss-120b",
+) -> str:
+    """Construct prompt for Gemini to generate visual cues.
+
+    If Gemini fails entirely and a Groq API key is configured, falls back to
+    Groq so this step can still complete without Gemini quota/availability.
+    """
     system_prompt = f"""You are an expert AI art director for a top-tier YouTube psychology & technology explainer channel called "The Hidden Why".
 
 Analyze the following script section and create 2 to 3 vivid, highly detailed image generation prompts (for Midjourney / Imagen / DALL-E) that visually represent the concepts in this section.
@@ -121,8 +198,29 @@ Script Section ({section_name}):
 Format your output like:
 Prompt 1: [Detailed cinematic visual prompt]
 Prompt 2: [Detailed cinematic visual prompt]
+
+Then, on a final separate line, add ONE stock footage search query for finding a REAL
+(non-AI-generated) video clip on stock footage sites like Pexels that pairs well with
+this section. This must describe something that actually exists and could be filmed —
+real people, real places, real objects, real everyday actions. Do NOT use any of the
+surreal/art-direction language from the prompts above (no "holographic", "neon",
+"digital void", "glowing", "cinematic render", metaphors, etc.). Keep it to 4-8 plain
+English words, nouns and actions only.
+Format that line EXACTLY like:
+STOCK FOOTAGE QUERY: [4-8 plain words]
 """
-    return call_gemini_api(system_prompt, api_key, model_id)
+    try:
+        return call_gemini_api(system_prompt, api_key, model_id)
+    except RuntimeError as gemini_err:
+        if not groq_key:
+            raise
+        print(f"\n[INFO] Gemini failed ({gemini_err}). Falling back to Groq ({groq_model})...")
+        try:
+            return call_groq_api(system_prompt, groq_key, groq_model)
+        except RuntimeError as groq_err:
+            raise RuntimeError(
+                f"Both Gemini and Groq failed.\nGemini: {gemini_err}\nGroq: {groq_err}"
+            )
 
 
 def main():
@@ -133,6 +231,9 @@ def main():
         print("[ERROR] GEMINI_API_KEY is not set.")
         print("Please add GEMINI_API_KEY=your_key_here to your .env file.")
         sys.exit(1)
+
+    groq_key = os.getenv("GROQ_API_KEY")
+    groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
     script_dir = os.path.abspath(args.script_dir)
     output_path = os.path.abspath(args.output)
@@ -157,6 +258,7 @@ def main():
     print(f"Script Directory : {script_dir}")
     print(f"Output File      : {output_path}")
     print(f"Model ID         : {args.model}")
+    print(f"Groq Fallback    : {'enabled (' + groq_model + ')' if groq_key else 'disabled (no GROQ_API_KEY set)'}")
     print(f"Files to process : {len(txt_files)} section(s)")
     print("-" * 65)
 
@@ -187,6 +289,8 @@ def main():
                 script_text=content,
                 api_key=api_key,
                 model_id=args.model,
+                groq_key=groq_key,
+                groq_model=groq_model,
             )
 
             all_outputs.append(f"[SECTION] {file_base}")
