@@ -26,6 +26,8 @@ try:
 except ImportError:
     pass
 
+from generate_prompts_gemini import call_gemini_api
+
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 
@@ -112,6 +114,12 @@ def is_vertical_project() -> bool:
 # Global process logger for UI output logs
 logs_lock = threading.Lock()
 activity_logs = []
+pipeline_state = {
+    "running": False,
+    "project": None,
+    "failed_stage": None,
+    "failed_stage_index": None,
+}
 
 
 def add_log(msg, log_type="info"):
@@ -149,6 +157,48 @@ def run_pipeline_script(cmd, env_vars=None, error_keywords=("ERROR",),
         add_log(line_str, log_type)
     proc.wait()
     return proc.returncode
+
+def get_video_pipeline_stages(voice_id: str, force: bool = False, vertical: bool = False):
+    stages = [
+        ("Voiceover", [sys.executable, "generate_audio.py", "--voice-id", voice_id]),
+        ("Visual prompts", [sys.executable, "generate_prompts_gemini.py"]),
+        ("B-roll footage", [sys.executable, "generate_footage_pexels.py"]),
+        ("Video assembly", [sys.executable, "build_video.py"]),
+    ]
+    if force:
+        stages[0][1].append("--force")
+        stages[2][1].append("--force")
+    if vertical:
+        stages[2][1].append("--portrait")
+        stages[3][1].append("--vertical")
+    return stages
+
+
+def run_video_pipeline(proj_dir: str, proj_name: str, voice_id: str, force: bool = False,
+                       vertical: bool = False, start_stage: int = 0):
+    """Run video stages from start_stage, leaving YouTube upload separate."""
+    env_vars = {**os.environ, "PROJECT_DIR": proj_dir, "PYTHONUTF8": "1"}
+    stages = get_video_pipeline_stages(voice_id, force, vertical)
+    pipeline_state.update({"running": True, "project": proj_name, "failed_stage": None, "failed_stage_index": None})
+
+    for stage_index, (stage_name, command) in enumerate(stages[start_stage:], start=start_stage):
+        add_log(f"[{proj_name}] Starting {stage_name}...", "info")
+        return_code = run_pipeline_script(
+            command,
+            env_vars,
+            error_keywords=("ERROR", "FAILED"),
+            warning_keywords=("WARNING",),
+            success_keywords=("DONE", "SUCCESS"),
+        )
+        if return_code != 0:
+            pipeline_state.update({"running": False, "project": proj_name,
+                                   "failed_stage": stage_name, "failed_stage_index": stage_index})
+            add_log(f"[{proj_name}] {stage_name} failed; pipeline stopped.", "error")
+            return
+        add_log(f"[{proj_name}] {stage_name} finished.", "success")
+
+    pipeline_state.update({"running": False, "project": proj_name, "failed_stage": None, "failed_stage_index": None})
+    add_log(f"[{proj_name}] Video is ready. YouTube upload remains a separate action.", "success")
 
 
 @app.route("/")
@@ -206,6 +256,10 @@ def create_project():
         os.makedirs(os.path.join(pdir, sub), exist_ok=True)
     if vertical:
         open(os.path.join(pdir, ".vertical"), "w").close()
+    else:
+        vertical_marker = os.path.join(pdir, ".vertical")
+        if os.path.exists(vertical_marker):
+            os.remove(vertical_marker)
 
     ACTIVE_PROJECT = clean_name
     kind = "Shorts (dọc)" if vertical else "video thường"
@@ -244,6 +298,7 @@ def get_status():
         "voice_id": voice_id,
         "active_project": ACTIVE_PROJECT,
         "is_vertical": is_vertical_project(),
+        "pipeline": dict(pipeline_state),
         "logs": activity_logs[-30:]
     })
 
@@ -293,6 +348,116 @@ def delete_script():
     return jsonify({"message": "Deleted"})
 
 
+def _build_split_units(full_text: str):
+    """Break the script into the smallest natural chunks we can split on.
+
+    Normally one line == one sentence/beat (this pipeline's scripts are
+    written that way). If the whole script was pasted as a single unbroken
+    blob with no line breaks at all, fall back to sentence-punctuation
+    splitting so there's still something granular enough to chunk.
+    """
+    units = [p.strip() for p in full_text.split("\n") if p.strip()]
+    if len(units) <= 1:
+        sentence_split = [s.strip() for s in re.split(r'(?<=[.!?])\s+', full_text.strip()) if s.strip()]
+        if len(sentence_split) > 1:
+            units = sentence_split
+    return units
+
+
+def _dangles(line: str) -> bool:
+    """True if a line grammatically continues into the next one (a setup
+    line for a question/cliffhanger/quote), so it's a bad place to cut."""
+    return line.rstrip().endswith(("...", "…", ":"))
+
+
+def _rule_based_chunks(units, target_len: int = 350, max_lookahead: int = 5):
+    """Accumulate units into ~target_len-character chunks, same as before,
+    but never cut right after a dangling line — pull following lines in
+    until the setup/payoff pair lands in the same chunk (capped so a run of
+    dangling lines can't swallow the rest of the script)."""
+    chunks = []
+    current = []
+    current_len = 0
+    i = 0
+    n = len(units)
+
+    while i < n:
+        current.append(units[i])
+        current_len += len(units[i])
+        i += 1
+        if current_len >= target_len:
+            lookahead = 0
+            while _dangles(current[-1]) and i < n and lookahead < max_lookahead:
+                current.append(units[i])
+                current_len += len(units[i])
+                i += 1
+                lookahead += 1
+            chunks.append(current)
+            current = []
+            current_len = 0
+
+    if current:
+        chunks.append(current)
+
+    return ["\n\n".join(chunk) for chunk in chunks]
+
+
+def _parse_split_boundaries(raw_text: str, total: int):
+    """Extract & validate the JSON array of ascending line-boundaries the
+    AI splitter is asked to return. None on anything malformed."""
+    match = re.search(r'\[[\d,\s]+\]', raw_text)
+    if not match:
+        return None
+    try:
+        boundaries = json.loads(match.group(0))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not boundaries or not all(isinstance(b, int) for b in boundaries):
+        return None
+    if boundaries[-1] != total:
+        return None
+    prev = 0
+    for b in boundaries:
+        if b <= prev:
+            return None
+        prev = b
+    return boundaries
+
+
+def ai_split_sections(units, api_key: str, model_id: str = "gemini-3.5-flash"):
+    """Ask Gemini to decide section boundaries (returns only line numbers,
+    never rewritten text), then rebuild sections from the ORIGINAL units so
+    the spoken script text is guaranteed byte-for-byte unchanged.
+
+    Returns a list of section text blocks, or None if Gemini is unavailable
+    or its response can't be trusted (caller should fall back to
+    _rule_based_chunks in that case).
+    """
+    numbered_text = "\n".join(f"{i + 1}: {u}" for i, u in enumerate(units))
+    prompt = f"""You are splitting a narration script into sections for video editing.
+
+Below is the full script, broken into {len(units)} numbered lines (each line is one sentence or short phrase, in original order).
+
+Group these numbered lines into consecutive sections of roughly 350 to 500 characters of spoken text each (about 30-45 seconds of narration). It is more important to end each section at a natural narrative/topic boundary than to hit the character count exactly. In particular, NEVER end a section right after a line that sets up a question, cliffhanger, or incomplete thought (e.g. a line ending in "...", ":", or a rhetorical question) when the very next line is its direct payoff or answer — keep such setup/payoff pairs in the same section.
+
+Numbered lines:
+{numbered_text}
+
+Respond with ONLY a JSON array of ascending integers — the line number that ends each section — nothing else. The last number MUST equal {len(units)} (every line covered exactly once, no gaps, no repeats). Example format: [7, 15, 23, 31]"""
+
+    raw = call_gemini_api(prompt, api_key, model_id)
+    boundaries = _parse_split_boundaries(raw, len(units))
+    if boundaries is None:
+        return None
+
+    sections = []
+    prev = 0
+    for b in boundaries:
+        sections.append("\n\n".join(units[prev:b]))
+        prev = b
+    return sections
+
+
 @app.route("/api/scripts/split-and-save", methods=["POST"])
 def split_and_save_script():
     data = request.json or {}
@@ -306,6 +471,7 @@ def split_and_save_script():
     # Smart split logic into distinct video sections (~30-45s spoken per section, ~350-500 chars)
     # Parsed before touching disk so a bad input never wipes existing project data.
     sections = []
+    split_method = "marker"
     raw_blocks = re.split(r'(?m)^(?:\[|\#|\bPART\s*\d+\b|\bPart\s*\d+\b)', full_text)
     cleaned_blocks = [b.strip() for b in raw_blocks if b.strip()]
 
@@ -320,24 +486,24 @@ def split_and_save_script():
                     title_slug = f"part{idx}_{first_line}"
             sections.append((title_slug, block.strip()))
     else:
-        paragraphs = [p.strip() for p in full_text.split("\n") if p.strip()]
-        current_chunk = []
-        current_len = 0
-        part_idx = 0
+        units = _build_split_units(full_text)
 
-        for p in paragraphs:
-            current_chunk.append(p)
-            current_len += len(p)
-            if current_len >= 350:
-                slug = f"part{part_idx}_cold_open" if part_idx == 0 else f"part{part_idx}_section"
-                sections.append((slug, "\n\n".join(current_chunk)))
-                current_chunk = []
-                current_len = 0
-                part_idx += 1
+        chunk_texts = None
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key and len(units) > 1:
+            try:
+                chunk_texts = ai_split_sections(units, api_key)
+            except Exception as e:
+                add_log(f"AI Smart-Split failed ({e}), falling back to rule-based splitter.", "warning")
+                chunk_texts = None
 
-        if current_chunk:
-            slug = f"part{part_idx}_cold_open" if part_idx == 0 else f"part{part_idx}_section"
-            sections.append((slug, "\n\n".join(current_chunk)))
+        split_method = "AI (Gemini)" if chunk_texts else "rule-based"
+        if not chunk_texts:
+            chunk_texts = _rule_based_chunks(units)
+
+        for idx, text in enumerate(chunk_texts):
+            slug = f"part{idx}_cold_open" if idx == 0 else f"part{idx}_section"
+            sections.append((slug, text))
 
     if not sections:
         return jsonify({"error": "Không thể tách kịch bản thành các phần hợp lệ."}), 400
@@ -377,9 +543,9 @@ def split_and_save_script():
             f.write(text)
         created_files.append(fname)
 
-    add_log(f"⚡ Smart Script Auto-Splitter: Created {len(created_files)} section(s) for {ACTIVE_PROJECT}!", "success")
+    add_log(f"⚡ Smart Script Auto-Splitter ({split_method}): Created {len(created_files)} section(s) for {ACTIVE_PROJECT}!", "success")
     return jsonify({
-        "message": f"Đã tự động chia kịch bản thành {len(created_files)} phần (section) cho dự án [{ACTIVE_PROJECT}]!",
+        "message": f"Đã tự động chia kịch bản thành {len(created_files)} phần (section) cho dự án [{ACTIVE_PROJECT}] (phương thức: {split_method})!",
         "files": created_files
     })
 
@@ -484,6 +650,48 @@ def run_build_video():
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({"message": "Video assembly started."})
 
+@app.route("/api/create-video", methods=["POST"])
+def create_video():
+    """Start the complete generation pipeline for the active project."""
+    data = request.json or {}
+    voice_id = data.get("voice_id", os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"))
+    force = bool(data.get("force", False))
+    proj_dir = get_active_proj_dir()
+    proj_name = ACTIVE_PROJECT
+
+    if not any(fname.endswith(".txt") for fname in os.listdir(get_script_dir())):
+        return jsonify({"error": "Hãy tạo hoặc dán kịch bản trước khi tạo video."}), 400
+
+    def worker():
+        run_video_pipeline(proj_dir, proj_name, voice_id, force, is_vertical_project())
+
+    threading.Thread(target=worker, daemon=True).start()
+    kind = "Short" if is_vertical_project() else "video thường"
+    return jsonify({"message": f"Đã bắt đầu tạo {kind} theo toàn bộ quy trình. Theo dõi Console Log."})
+
+
+@app.route("/api/create-video/retry", methods=["POST"])
+def retry_video_pipeline():
+    """Retry the failed stage and continue the remaining video stages."""
+    if pipeline_state.get("running"):
+        return jsonify({"error": "Pipeline đang chạy, chưa thể retry."}), 409
+    failed_stage_index = pipeline_state.get("failed_stage_index")
+    if failed_stage_index is None:
+        return jsonify({"error": "Không có bước nào đang chờ retry."}), 400
+
+    data = request.json or {}
+    voice_id = data.get("voice_id", os.getenv("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"))
+    proj_dir = get_active_proj_dir()
+    proj_name = ACTIVE_PROJECT
+    if pipeline_state.get("project") != proj_name:
+        return jsonify({"error": "Project hiện tại không trùng với project bị lỗi."}), 409
+
+    def worker():
+        run_video_pipeline(proj_dir, proj_name, voice_id, False, is_vertical_project(), failed_stage_index)
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"message": f"Đang retry bước {pipeline_state['failed_stage']} và các bước tiếp theo."})
+
 
 @app.route("/api/shorts/sections", methods=["GET"])
 def list_shorts_sections():
@@ -560,17 +768,30 @@ def run_upload_youtube():
     title = data.get("title", "Why You Can't Stop Scrolling | The Hidden Why")
     description = data.get("description", "")
     privacy = data.get("privacy", "private")
-    video_path = os.path.join(get_video_dir(), "final_video.mp4")
+    is_short = bool(data.get("is_short"))
     proj_name = ACTIVE_PROJECT
+
+    if is_short:
+        # basename() strips any path components the client might send, so this
+        # can only ever resolve to a file directly inside this project's shorts dir.
+        short_filename = os.path.basename(data.get("video", "").strip())
+        if not short_filename:
+            return jsonify({"error": "Thiếu tên file Short cần upload."}), 400
+        video_path = os.path.join(get_video_dir(), "shorts", short_filename)
+    else:
+        video_path = os.path.join(get_video_dir(), "final_video.mp4")
 
     if not os.path.exists(video_path):
         return jsonify({"error": f"Video file for project [{proj_name}] not found. Please assemble video first."}), 400
 
     def worker():
-        add_log(f"[{proj_name}] Starting YouTube Upload (Privacy: {privacy.upper()})...", "info")
+        add_log(f"[{proj_name}] Starting YouTube Upload (Privacy: {privacy.upper()}"
+                 f"{', SHORT' if is_short else ''})...", "info")
         cmd = [sys.executable, "upload_youtube.py", "--video", video_path, "--title", title, "--privacy", privacy]
         if description:
             cmd.extend(["--description", description])
+        if is_short:
+            cmd.append("--shorts")
         run_pipeline_script(cmd, success_keywords=("SUCCESS", "Completed"))
 
     threading.Thread(target=worker, daemon=True).start()

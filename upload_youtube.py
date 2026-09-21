@@ -10,8 +10,17 @@ Token is cached locally (token.json) so login only occurs on the first run.
 
 import argparse
 import os
+import re
+import subprocess
 import sys
 import time
+
+try:
+    import imageio_ffmpeg
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+except ImportError:
+    import shutil
+    FFMPEG_PATH = shutil.which("ffmpeg")
 
 try:
     from dotenv import load_dotenv
@@ -45,6 +54,32 @@ except ImportError:
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 TOKEN_FILE = "token.json"
+
+
+def probe_video(path: str) -> dict:
+    """Best-effort ffmpeg probe of a video's duration (seconds) and
+    width/height. Returns whatever it could determine (never raises) — used
+    only for a friendly Shorts-eligibility warning, not to block upload."""
+    info = {}
+    if not FFMPEG_PATH:
+        return info
+    try:
+        res = subprocess.run(
+            [FFMPEG_PATH, "-i", path, "-f", "null", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        stderr = res.stderr.decode("utf-8", errors="ignore")
+    except Exception:
+        return info
+    dur_m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", stderr)
+    if dur_m:
+        hours, minutes, seconds = dur_m.groups()
+        info["duration"] = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    res_m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", stderr)
+    if res_m:
+        info["width"] = int(res_m.group(1))
+        info["height"] = int(res_m.group(2))
+    return info
 
 
 def get_authenticated_service(client_secrets_file: str):
@@ -151,6 +186,13 @@ def parse_args():
         default=os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "client_secret.json"),
         help="Path to OAuth2 client_secret.json file",
     )
+    parser.add_argument(
+        "--shorts",
+        action="store_true",
+        help="Tag this upload as a YouTube Short: appends #Shorts to the description "
+             "(YouTube uses it, together with a vertical/short-duration video, to classify "
+             "uploads into the Shorts shelf) and warns if the video file doesn't look eligible.",
+    )
     return parser.parse_args()
 
 
@@ -231,6 +273,20 @@ def main():
 
     tags_list = [tag.strip() for tag in args.tags.split(",") if tag.strip()]
 
+    if args.shorts:
+        if "#shorts" not in description.lower():
+            description = description.rstrip() + "\n\n#Shorts"
+
+        info = probe_video(video_path)
+        width, height = info.get("width"), info.get("height")
+        duration = info.get("duration")
+        if width and height and width >= height:
+            print(f"[WARNING] Video looks landscape ({width}x{height}) — YouTube Shorts requires "
+                  "a vertical or square video to be classified correctly.")
+        if duration and duration > 180:
+            print(f"[WARNING] Video is {duration:.0f}s long — YouTube Shorts requires <=180s "
+                  "(3 minutes) to be classified correctly.")
+
     print("=" * 65)
     print(" 🚀  The Hidden Why - YouTube Video Uploader (Phase 2)")
     print("=" * 65)
@@ -238,6 +294,8 @@ def main():
     print(f"Title         : {args.title}")
     print(f"Privacy       : {args.privacy.upper()} (Default)")
     print(f"Tags          : {tags_list}")
+    if args.shorts:
+        print("Shorts Mode   : ON (#Shorts tag added to description)")
     print("-" * 65)
 
     # Authenticate via OAuth2

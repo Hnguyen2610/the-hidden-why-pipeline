@@ -1,5 +1,15 @@
 let currentScriptFilename = "";
 
+async function readApiResponse(response) {
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+        return await response.json();
+    }
+
+    const text = await response.text();
+    throw new Error(`Server trả về HTTP ${response.status} thay vì JSON${text ? `: ${text.slice(0, 120)}` : ""}`);
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     setupTabs();
     setupConsoleResize();
@@ -106,33 +116,57 @@ function clearScriptEditor() {
 }
 
 async function createNewProjectPrompt() {
-    const rawName = prompt("Nhập tên Video / Dự Án Mới (VD: Video 2 - Dopamine Detox):");
-    if (!rawName || !rawName.trim()) return;
+    const modal = document.getElementById("new-project-modal");
+    const nameInput = document.getElementById("new-project-name");
+    if (!modal || !nameInput) return;
 
-    const vertical = confirm(
-        "Tạo dạng YouTube Shorts (khổ dọc 9:16)?\n\n" +
-        "OK = Shorts (dọc)\nHủy = Video thường (ngang)"
-    );
+    nameInput.value = "";
+    modal.classList.add("open");
+    nameInput.focus();
+
+    const selection = await new Promise(resolve => {
+        modal.querySelectorAll("[data-format]").forEach(button => {
+            button.onclick = () => {
+                const name = nameInput.value.trim();
+                if (!name) {
+                    nameInput.focus();
+                    return;
+                }
+                modal.classList.remove("open");
+                resolve({ name, vertical: button.dataset.format === "short" });
+            };
+        });
+        modal.querySelector("[data-close]").onclick = () => {
+            modal.classList.remove("open");
+            resolve(null);
+        };
+    });
+
+    if (!selection) return;
 
     try {
         const res = await fetch("/api/projects/create", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: rawName.trim(), vertical })
+            body: JSON.stringify({ name: selection.name, vertical: selection.vertical })
         });
-        const data = await res.json();
+        const data = await readApiResponse(res);
         if (res.ok) {
             alert("🎉 " + data.message);
             clearScriptEditor();
-            await loadProjects();
-            refreshStatus();
-            loadScripts();
-            loadPrompts();
+            try {
+                await loadProjects();
+                await refreshStatus();
+                await loadScripts();
+                await loadPrompts();
+            } catch (refreshError) {
+                console.error("Project created, but refresh failed:", refreshError);
+            }
         } else {
             alert("Lỗi: " + data.error);
         }
     } catch (err) {
-        alert("Lỗi: " + err);
+        alert("Lỗi tạo project: " + err.message);
     }
 }
 
@@ -160,11 +194,11 @@ function switchTab(tabName) {
     const titles = {
         dashboard: "Dashboard Tổng Quan",
         scripts: "Quản Lý Kịch Bản (Script Editor)",
-        voice: "Phase 1: Tạo Giọng Đọc (ElevenLabs)",
-        prompts: "Phase 2: Visuals & Prompts AI (Gemini & Pexels)",
-        video: "Phase 3: Ghép Video (FFmpeg Assembler)",
-        shorts: "Shorts — Cắt Video Dọc (9:16)",
-        youtube: "Phase 4: Upload YouTube (OAuth2 Private)"
+        voice: "Tạo Video",
+        prompts: "Tạo Video",
+        video: "Tạo Video",
+        shorts: "Tạo Video Short",
+        youtube: "Upload YouTube (OAuth2 Private)"
     };
     if (pageTitle && titles[tabName]) {
         pageTitle.textContent = titles[tabName];
@@ -198,8 +232,31 @@ async function refreshStatus() {
         if (data.logs) {
             renderLogs(data.logs);
         }
+        const failedStage = data.pipeline && data.pipeline.failed_stage;
+        document.querySelectorAll(".pipeline-retry").forEach(retryButton => {
+            retryButton.hidden = !failedStage || data.pipeline.running;
+            if (failedStage) retryButton.textContent = `↻ Retry ${failedStage}`;
+        });
     } catch (err) {
         console.error("Status fetch error:", err);
+    }
+}
+
+async function retryFailedStage() {
+    try {
+        const res = await fetch("/api/create-video/retry", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ voice_id: document.getElementById("select-voice")?.value })
+        });
+        const data = await readApiResponse(res);
+        if (!res.ok) {
+            alert("Lỗi retry: " + data.error);
+            return;
+        }
+        alert("↻ " + data.message);
+    } catch (err) {
+        alert("Lỗi retry: " + err.message);
     }
 }
 
@@ -350,6 +407,51 @@ async function triggerAutoSplitScript() {
     }
 }
 
+async function triggerCreateVideo() {
+    const fullScript = document.getElementById("full-script-input").value;
+    if (!fullScript || !fullScript.trim()) {
+        alert("Vui lòng dán kịch bản video mới của bạn vào ô văn bản!");
+        return;
+    }
+
+    if (!confirm("Hệ thống sẽ tạo audio, visual, footage và ghép video theo loại project hiện tại. Tiếp tục?")) {
+        return;
+    }
+
+    try {
+        const splitRes = await fetch("/api/scripts/split-and-save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ full_script: fullScript })
+        });
+        const splitData = await splitRes.json();
+        if (!splitRes.ok) {
+            alert("Lỗi khởi tạo kịch bản: " + splitData.error);
+            return;
+        }
+
+        const createRes = await fetch("/api/create-video", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                voice_id: document.getElementById("select-voice").value,
+                force: document.getElementById("check-force").checked
+            })
+        });
+        const createData = await createRes.json();
+        if (createRes.ok) {
+            alert("🎬 " + createData.message);
+            document.getElementById("full-script-input").value = "";
+            clearScriptEditor();
+            loadScripts();
+        } else {
+            alert("Lỗi tạo video: " + createData.error);
+        }
+    } catch (err) {
+        alert("Lỗi: " + err);
+    }
+}
+
 function addNewScriptPrompt() {
     const name = prompt("Nhập tên file kịch bản mới (e.g. part6_next.txt):");
     if (name) {
@@ -445,7 +547,7 @@ async function loadShortsSections() {
         const data = await res.json();
         container.innerHTML = "";
         if (!data.sections || data.sections.length === 0) {
-            container.innerHTML = '<span style="color:#64748b;">Chưa có section nào có audio. Tạo audio trước ở Phase 1.</span>';
+            container.innerHTML = '<span style="color:#64748b;">Chưa có section nào có audio. Hãy tạo video trước.</span>';
             return;
         }
         data.sections.forEach(sec => {
@@ -508,12 +610,35 @@ async function loadShortsList() {
             item.style.cssText = "display:flex; align-items:center; gap:14px; background:#0c1220; border:1px solid #1e3a5f; border-radius:8px; padding:10px;";
             item.innerHTML = `
                 <video src="/media/shorts/${filename}" controls style="width:120px; height:213px; border-radius:6px; background:#000; object-fit:cover;"></video>
-                <span style="font-weight:600;">${filename}</span>
+                <span style="font-weight:600; flex:1;">${filename}</span>
+                <button class="btn btn-danger" onclick="triggerUploadShort('${filename}')">🚀 Upload Short</button>
             `;
             container.appendChild(item);
         });
     } catch (err) {
         container.innerHTML = '<span style="color:#f87171;">Lỗi tải danh sách Shorts.</span>';
+    }
+}
+
+async function triggerUploadShort(filename) {
+    const suggestedTitle = filename.replace(/\.mp4$/i, "").replace(/_/g, " ") + " #Shorts";
+    const title = prompt("Tiêu đề cho Short này:", suggestedTitle);
+    if (title === null) return;
+
+    try {
+        const res = await fetch("/api/upload-youtube", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, privacy: "private", video: filename, is_short: true })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert("🚀 " + data.message + "\nTheo dõi log ở góc dưới màn hình. Mặc định upload ở chế độ PRIVATE an toàn.");
+        } else {
+            alert("Lỗi: " + data.error);
+        }
+    } catch (err) {
+        alert("Lỗi: " + err);
     }
 }
 

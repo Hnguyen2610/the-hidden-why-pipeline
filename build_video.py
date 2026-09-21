@@ -12,11 +12,18 @@ fallback posters so you can assemble a draft video instantly!
 
 import argparse
 import glob
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+
+from audio_timing import (
+    align_text_to_segments,
+    detect_speech_segments,
+    get_media_duration_seconds as _shared_get_media_duration_seconds,
+)
 
 # Try importing Pillow for fallback poster generation
 try:
@@ -135,41 +142,10 @@ def create_fallback_image(output_image_path: str, title_text: str, width: int = 
 
 def get_audio_duration_seconds(audio_path: str) -> float:
     """Probe an audio file's duration (seconds) using ffmpeg (no ffprobe dependency)."""
-    cmd = [FFMPEG_PATH, "-i", audio_path, "-f", "null", "-"]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stderr = res.stderr.decode("utf-8", errors="ignore")
-    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", stderr)
-    if not m:
+    duration = _shared_get_media_duration_seconds(FFMPEG_PATH, audio_path)
+    if not duration:
         raise RuntimeError(f"Could not determine duration of '{audio_path}'")
-    hours, minutes, seconds = m.groups()
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-
-
-def detect_speech_segments(audio_path: str, total_duration: float,
-                            noise_db: str = "-30dB", min_silence: float = 0.15) -> list[tuple[float, float]]:
-    """
-    Find actual speech-active time ranges by detecting real silence gaps in the
-    audio (ffmpeg silencedetect) — TTS voiceovers pause at commas/periods, and
-    those pauses are NOT proportional to character count, so subtitle timing
-    based purely on character count drifts more and more over a long section.
-    Returns (start, end) tuples covering every non-silent stretch, in order.
-    """
-    cmd = [FFMPEG_PATH, "-i", audio_path, "-af", f"silencedetect=noise={noise_db}:d={min_silence}", "-f", "null", "-"]
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stderr = res.stderr.decode("utf-8", errors="ignore")
-
-    silence_starts = [float(x) for x in re.findall(r"silence_start:\s*([\d.]+)", stderr)]
-    silence_ends = [float(x) for x in re.findall(r"silence_end:\s*([\d.]+)", stderr)]
-
-    segments = []
-    cursor = 0.0
-    for s_start, s_end in zip(silence_starts, silence_ends):
-        if s_start > cursor:
-            segments.append((cursor, s_start))
-        cursor = max(cursor, s_end)
-    if cursor < total_duration:
-        segments.append((cursor, total_duration))
-    return segments
+    return duration
 
 
 def clean_text_for_captions(text: str) -> str:
@@ -223,63 +199,6 @@ def split_text_into_clauses(text: str, max_chars: int = 60) -> list[str]:
     return clauses
 
 
-def build_speech_timeline(segments: list[tuple[float, float]]):
-    """
-    Build a mapping from a "speech-only" cumulative timeline (silence gaps
-    removed) back to real wall-clock time. Returns (mapping, total_speech_time)
-    where mapping is a list of (wall_start, wall_end, speech_start, speech_end).
-    """
-    mapping = []
-    cum = 0.0
-    for wall_start, wall_end in segments:
-        length = wall_end - wall_start
-        mapping.append((wall_start, wall_end, cum, cum + length))
-        cum += length
-    return mapping, cum
-
-
-def speech_time_to_wallclock(t: float, mapping) -> float:
-    """Convert a point on the cumulative speech-only timeline to a real timestamp."""
-    if not mapping:
-        return t
-    for wall_start, wall_end, speech_start, speech_end in mapping:
-        if t <= speech_end:
-            span = speech_end - speech_start
-            frac = 0.0 if span <= 0 else (t - speech_start) / span
-            return wall_start + frac * (wall_end - wall_start)
-    return mapping[-1][1]
-
-
-def align_clauses_to_segments(
-    clauses: list[str], segments: list[tuple[float, float]]
-) -> list[tuple[float, float, str]]:
-    """
-    Distribute text clauses proportionally (by character count) over the
-    audio's TOTAL SPEECH TIME ONLY — silence gaps between segments are
-    skipped over rather than counted, so drift never accumulates from pauses
-    at commas/periods. This does not require clause count to match segment
-    count, since it works on total speech-time share rather than 1:1 mapping.
-    """
-    if not clauses or not segments:
-        return []
-
-    mapping, total_speech_time = build_speech_timeline(segments)
-    total_chars = sum(len(c) for c in clauses) or 1
-
-    result = []
-    cursor = 0.0
-    for clause in clauses:
-        piece = total_speech_time * (len(clause) / total_chars)
-        speech_start = cursor
-        speech_end = min(total_speech_time, cursor + piece)
-        cursor = speech_end
-        start = speech_time_to_wallclock(speech_start, mapping)
-        end = speech_time_to_wallclock(speech_end, mapping)
-        result.append((start, end, clause))
-
-    return result
-
-
 def compute_caption_timings(text: str, audio_path: str, duration_seconds: float,
                              max_chars_per_caption: int = 60) -> list[tuple[float, float, str]]:
     """
@@ -293,9 +212,9 @@ def compute_caption_timings(text: str, audio_path: str, duration_seconds: float,
     if not clauses:
         return []
 
-    segments = detect_speech_segments(audio_path, duration_seconds)
+    segments = detect_speech_segments(FFMPEG_PATH, audio_path, duration_seconds)
     if segments:
-        return align_clauses_to_segments(clauses, segments)
+        return align_text_to_segments(clauses, segments)
 
     total_chars = sum(len(c) for c in clauses) or 1
     timed = []
@@ -347,7 +266,7 @@ def generate_ass_content(text: str, audio_path: str, duration_seconds: float,
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
-        f"1,0,0,0,100,100,0,0,1,2,1,2,20,20,{margin_v},1\n"
+        f"1,0,0,0,100,100,0,0,1,3,1,2,20,20,{margin_v},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -372,13 +291,47 @@ def escape_path_for_ffmpeg_filter(path: str) -> str:
 
 
 def find_visual_for_section(file_base: str, footage_dir: str, image_dir: str,
-                             fallback_width: int = 1920, fallback_height: int = 1080) -> tuple[list[str], str]:
+                             fallback_width: int = 1920, fallback_height: int = 1080) -> tuple[list, str]:
     """
     Find the best available visual(s) for a section.
-    Priority: multi-clip B-roll set > single B-roll clip > Static image > fallback poster.
-    Returns (paths, type) where type is 'video' or 'image'. `paths` has more than
-    one entry only for a multi-clip B-roll set (see generate_footage_pexels.py).
+    Priority: Scene Planner set > multi-clip B-roll set > single B-roll clip > Static image > fallback poster.
+    Returns (paths, type). For type 'video'/'image', paths is a list of file
+    paths (more than one entry only for a multi-clip B-roll set — see
+    generate_footage_pexels.py). For type 'scenes', paths is a list of
+    {"start", "end", "clip"} dicts (one per sentence, absolute clip paths,
+    already gap-filled — see below) for cutting exactly when the narration
+    changes instead of at an arbitrary duration boundary.
     """
+    # Priority 0: Scene Planner set ({file_base}_scenes.json + {file_base}_scene1.mp4, ...).
+    # Checked before the legacy multi-clip glob below, which would otherwise treat
+    # '{file_base}_scene1.mp4' etc. as an old-style duration-cycled clip set.
+    scenes_json_path = os.path.join(footage_dir, f"{file_base}_scenes.json")
+    if os.path.exists(scenes_json_path):
+        try:
+            with open(scenes_json_path, "r", encoding="utf-8") as f:
+                raw_scenes = json.load(f)
+        except Exception:
+            raw_scenes = []
+
+        resolved = []
+        last_clip = None
+        for s in raw_scenes:
+            clip_name = s.get("clip")
+            if clip_name:
+                last_clip = os.path.join(footage_dir, clip_name)
+            resolved.append({"start": s["start"], "end": s["end"], "clip": last_clip})
+
+        # Backfill any leading scenes that had no clip yet when the first real
+        # clip appears, so every scene has *some* clip — never gaps.
+        first_clip = next((r["clip"] for r in resolved if r["clip"]), None)
+        if first_clip:
+            for r in resolved:
+                if r["clip"] is not None:
+                    break
+                r["clip"] = first_clip
+            return resolved, "scenes"
+        # No scene got any clip at all — fall through to the priorities below.
+
     # Priority 1: multi-clip B-roll set ({file_base}_1.mp4, {file_base}_2.mp4, ...)
     # downloaded to cover a long section without looping one clip over and over.
     multi_paths = sorted(
@@ -489,9 +442,15 @@ def main():
     temp_segments = []
     temp_srt_files = []
 
-    subtitle_font_size = 26 if vertical else 20
-    subtitle_margin_v = 260 if vertical else 60
-    subtitle_max_chars = 28 if vertical else 60
+    # Sized around ~4% of frame height (roughly YouTube's own auto-caption
+    # size) instead of the old 20/26px, which read as noticeably small on a
+    # 1920x1080/1080x1920 frame — especially on a phone screen. max_chars is
+    # trimmed down alongside the font size since WrapStyle 2 (see
+    # generate_ass_content) never auto-wraps a line that's too wide for the
+    # frame; it would just run off the sides instead of wrapping.
+    subtitle_font_size = 60 if vertical else 46
+    subtitle_margin_v = 260 if vertical else 70
+    subtitle_max_chars = 24 if vertical else 50
 
     try:
         for idx, mp3_file in enumerate(mp3_files):
@@ -504,7 +463,9 @@ def main():
             segment_path = os.path.join(output_dir, f"_temp_segment_{idx:02d}.mp4")
             temp_segments.append(segment_path)
 
-            if visual_type == "video" and len(visual_paths) > 1:
+            if visual_type == "scenes":
+                type_label = f"[SCENES x{len(visual_paths)}]"
+            elif visual_type == "video" and len(visual_paths) > 1:
                 type_label = f"[B-ROLL x{len(visual_paths)}]"
             else:
                 type_label = "[B-ROLL]" if visual_type == "video" else "[IMAGE] "
@@ -590,6 +551,54 @@ def main():
                                                  # explicit hard cutoff is what actually keeps
                                                  # segment length == audio length, which subtitle
                                                  # sync depends on for every section after this one.
+                    segment_path,
+                ]
+            elif visual_type == "scenes":
+                # One input per sentence, each trimmed to exactly that sentence's
+                # detected speech window and concatenated in order — cuts land
+                # where the narration changes instead of at a duration boundary.
+                # '-stream_loop -1' on every scene input covers the rare case
+                # where a fetched clip is shorter than its scene's window; the
+                # trim filter below still cuts it to the exact length needed.
+                if vertical:
+                    per_clip_scale = f"scale={video_w}:{video_h}:force_original_aspect_ratio=increase,crop={video_w}:{video_h}"
+                else:
+                    per_clip_scale = f"scale={video_w}:{video_h}:force_original_aspect_ratio=decrease,pad={video_w}:{video_h}:(ow-iw)/2:(oh-ih)/2"
+
+                inputs = []
+                filter_parts = []
+                concat_labels = ""
+                for i, scene in enumerate(visual_paths):
+                    scene_duration = max(0.1, scene["end"] - scene["start"])
+                    inputs += ["-stream_loop", "-1", "-i", scene["clip"]]
+                    filter_parts.append(
+                        f"[{i}:v]{per_clip_scale},setsar=1,fps=25,"
+                        f"trim=duration={scene_duration:.3f},setpts=PTS-STARTPTS[v{i}]"
+                    )
+                    concat_labels += f"[v{i}]"
+                inputs += ["-i", audio_path]
+                audio_input_idx = len(visual_paths)
+
+                filter_parts.append(f"{concat_labels}concat=n={len(visual_paths)}:v=1:a=0[vcat]")
+                final_label = "vcat"
+                if subtitle_expr:
+                    filter_parts.append(f"[vcat]{subtitle_expr}[vout]")
+                    final_label = "vout"
+
+                cmd = [
+                    FFMPEG_PATH,
+                    "-y",
+                    *inputs,
+                    "-filter_complex", ";".join(filter_parts),
+                    "-map", f"[{final_label}]",
+                    "-map", f"{audio_input_idx}:a:0",
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    "-shortest",
+                    "-t", str(audio_duration),
                     segment_path,
                 ]
             else:

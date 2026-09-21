@@ -7,12 +7,12 @@ A minimal, local Python automation pipeline for **"The Hidden Why"** YouTube cha
 ```text
 d:\the-hidden-why-pipeline\
 ├── app.py                     # Studio Web UI (http://localhost:5000)
-├── generate_audio.py          # Phase 1: ElevenLabs voice generation per section
-├── generate_prompts_gemini.py # Phase 2a: Automated visual prompt generator (Gemini)
-├── generate_images_gemini.py  # Phase 2b: Imagen API visual image generator
-├── generate_footage_veo.py    # Phase 2c: Veo 3 / Veo 2 B-roll video generator
-├── build_video.py             # Phase 3: Automated FFmpeg video assembler
-├── upload_youtube.py          # Phase 4: YouTube Data API v3 upload (Private by default)
+├── generate_audio.py          # Voice generation per section
+├── generate_prompts_gemini.py # Automated visual prompt generator (Gemini)
+├── generate_images_gemini.py  # Imagen API visual image generator
+├── generate_footage_veo.py    # Veo 3 / Veo 2 B-roll video generator
+├── build_video.py             # Automated FFmpeg video assembler
+├── upload_youtube.py          # Separate YouTube Data API v3 upload (Private by default)
 ├── script/                    # Section script .txt files (part0_cold_open.txt, etc.)
 ├── audio/                     # Generated audio .mp3 files
 ├── images/                    # Section image files (part0_cold_open.png, etc.)

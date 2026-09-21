@@ -20,7 +20,23 @@ try:
 except ImportError:
     EDGE_TTS_AVAILABLE = False
 
-DEFAULT_EDGE_TTS_VOICE = "en-US-AndrewNeural"  # Warm, Confident, Authentic, Honest — closest free match to the ElevenLabs "George" voice
+DEFAULT_EDGE_TTS_VOICE_EN = "en-US-AndrewNeural"  # Warm, Confident, Authentic, Honest — closest free match to the ElevenLabs "George" voice
+DEFAULT_EDGE_TTS_VOICE_VI = "vi-VN-NamMinhNeural"  # Native Vietnamese male voice
+
+_VIETNAMESE_CHARS = re.compile(
+    "[àáạảãăằắặẳẵâầấậẩẫèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ"
+    "ÀÁẠẢÃĂẰẮẶẲẴÂẦẤẬẨẪÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ]"
+)
+
+
+def detect_language(text: str) -> str:
+    """Cheap, dependency-free Vietnamese/English detector.
+
+    Vietnamese uses a large set of diacritic-marked vowels (plus "đ") that
+    never appear in English text, so a single match is a reliable signal —
+    no need for a language-detection library just for two languages.
+    """
+    return "vi" if _VIETNAMESE_CHARS.search(text) else "en"
 
 # Try importing python-dotenv; if not present, use a built-in fallback parser.
 try:
@@ -328,7 +344,11 @@ def generate_audio_for_text(text: str, voice_id: str, key_pool: KeyPool, model_i
 
 def main():
     args = parse_args()
-    edge_voice = os.getenv("EDGE_TTS_VOICE", DEFAULT_EDGE_TTS_VOICE)
+    # EDGE_TTS_VOICE (legacy, no language suffix) is an explicit override that
+    # pins one voice regardless of detected language, for backward compatibility.
+    explicit_edge_voice = os.getenv("EDGE_TTS_VOICE")
+    edge_voice_en = os.getenv("EDGE_TTS_VOICE_EN", DEFAULT_EDGE_TTS_VOICE_EN)
+    edge_voice_vi = os.getenv("EDGE_TTS_VOICE_VI", DEFAULT_EDGE_TTS_VOICE_VI)
 
     api_keys = get_api_keys()
     if not api_keys and not EDGE_TTS_AVAILABLE:
@@ -383,11 +403,31 @@ def main():
 
     pending_chars = sum(len(texts_by_file[f]) for f in pending_files)
 
+    # Detect the script's language once for the whole run (a video's script is
+    # one language throughout) so the right edge-tts voice gets picked. Skipped
+    # entirely when EDGE_TTS_VOICE pins an explicit voice, for backward compat.
+    detected_lang = None
+    if explicit_edge_voice is None and pending_files:
+        sample_text = "\n".join(texts_by_file[f] for f in pending_files)
+        detected_lang = detect_language(sample_text)
+
+    if explicit_edge_voice is not None:
+        edge_voice = explicit_edge_voice
+    else:
+        edge_voice = edge_voice_vi if detected_lang == "vi" else edge_voice_en
+
     # Decide ONE engine for this entire run so a single video never mixes
     # ElevenLabs and edge-tts voices mid-way through.
     engine = "elevenlabs"
     remaining_quota = None
+    forced_vietnamese = detected_lang == "vi"
     if not api_keys:
+        engine = "edge_tts"
+    elif forced_vietnamese:
+        # ElevenLabs has no native Vietnamese voice — edge-tts's dedicated
+        # Vietnamese voices sound far more natural than the multilingual
+        # model attempting Vietnamese, so prefer them outright, regardless
+        # of remaining ElevenLabs quota.
         engine = "edge_tts"
     elif pending_files:
         remaining_quota = get_elevenlabs_remaining_quota(key_pool)
@@ -408,6 +448,8 @@ def main():
     print(f"Force Overwrite  : {args.force}")
     print(f"Files Found      : {len(txt_files)} file(s), {len(pending_files)} to generate, "
           f"{len(already_generated_files)} already done")
+    if detected_lang is not None:
+        print(f"Language         : {'Vietnamese' if detected_lang == 'vi' else 'English'} (auto-detected)")
 
     if engine == "elevenlabs":
         print(f"Voice ID         : {args.voice_id}")
@@ -417,7 +459,8 @@ def main():
             print(f"ElevenLabs Quota : need {pending_chars}, {remaining_quota} remaining across {key_pool.total} key(s) — OK")
         print("Engine           : ElevenLabs (paid credits)")
     else:
-        print(f"Engine           : edge-tts FREE fallback (voice: {edge_voice})")
+        reason = "Vietnamese script detected" if forced_vietnamese else ("no ElevenLabs key configured" if not api_keys else "insufficient ElevenLabs quota")
+        print(f"Engine           : edge-tts FREE (voice: {edge_voice}) — {reason}")
         if remaining_quota is not None:
             print(f"[WARNING] Not enough ElevenLabs quota for this video: need {pending_chars} characters, "
                   f"only {remaining_quota} remaining across {key_pool.total} key(s).")

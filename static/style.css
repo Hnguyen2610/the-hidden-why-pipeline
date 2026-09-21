@@ -168,6 +168,70 @@ body {
   position: relative;
 }
 
+.console-actions { display: flex; align-items: center; gap: 10px; }
+.btn-retry {
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--accent-amber);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+.btn-retry:hover { background: rgba(245, 158, 11, 0.22); }
+.pipeline-retry { margin-left: 10px; }
+
+.project-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(3, 7, 18, 0.72);
+}
+
+.project-modal.open { display: flex; }
+
+.project-modal-card {
+  position: relative;
+  width: min(460px, 100%);
+  padding: 26px;
+  background: var(--bg-card);
+  border: 1px solid #334155;
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+}
+
+.project-modal-card h3 { font-size: 20px; margin-bottom: 6px; }
+.project-modal-card p { color: var(--text-muted); font-size: 13px; margin-bottom: 18px; }
+.project-modal-card input {
+  width: 100%;
+  padding: 11px 13px;
+  color: var(--text-main);
+  background: #090D16;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font: inherit;
+  margin-bottom: 16px;
+}
+.project-modal-card input:focus { outline: none; border-color: var(--accent-cyan); }
+.project-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 24px;
+  cursor: pointer;
+}
+.project-format-actions { display: flex; gap: 10px; }
+.project-format-actions .btn { flex: 1; }
+.project-format-actions span { display: block; font-size: 11px; opacity: 0.75; margin-top: 2px; }
+
 .top-header {
   padding: 16px 24px;
   border-bottom: 1px solid var(--border-color);

@@ -168,6 +168,22 @@ def call_groq_api(prompt_text: str, api_key: str, model_id: str) -> str:
     raise RuntimeError(f"Groq API HTTP {response.status_code}: {response.text[:200]}")
 
 
+def split_into_scene_lines(script_text: str) -> list:
+    """Recover the original sentence/beat lines of a script section.
+
+    Sections saved by app.py's script splitter join original sentence lines
+    with a blank line ("\\n\\n".join(units)), so splitting on blank lines
+    recovers them exactly. Falls back to sentence-punctuation splitting for
+    a section pasted/edited as one unbroken paragraph with no blank lines.
+    """
+    lines = [p.strip() for p in re.split(r'\n\s*\n', script_text.strip()) if p.strip()]
+    if len(lines) <= 1:
+        sentence_split = [s.strip() for s in re.split(r'(?<=[.!?])\s+', script_text.strip()) if s.strip()]
+        if len(sentence_split) > 1:
+            lines = sentence_split
+    return lines
+
+
 def generate_prompts_for_section(
     section_name: str,
     script_text: str,
@@ -181,6 +197,27 @@ def generate_prompts_for_section(
     If Gemini fails entirely and a Groq API key is configured, falls back to
     Groq so this step can still complete without Gemini quota/availability.
     """
+    scene_lines = split_into_scene_lines(script_text)
+    numbered_lines = "\n".join(f"{i + 1}: {line}" for i, line in enumerate(scene_lines))
+
+    scene_instructions = ""
+    if len(scene_lines) > 1:
+        scene_instructions = f"""
+
+The section above is made of {len(scene_lines)} numbered sentences/beats, listed below in
+order:
+{numbered_lines}
+
+After the STOCK FOOTAGE QUERY line, add exactly {len(scene_lines)} more lines — one REAL,
+filmable stock-footage query (same rules as above: plain, literal, 4-8 words, no surreal/
+art-direction language) for EACH numbered sentence, so B-roll can be matched to what's
+being said at that specific moment instead of the section as a whole. Number them to match
+the sentences exactly, one per line, in order, with no blank lines in between:
+SCENE 1: [4-8 plain words for sentence 1]
+SCENE 2: [4-8 plain words for sentence 2]
+(... one SCENE line per numbered sentence, ending at SCENE {len(scene_lines)})
+"""
+
     system_prompt = f"""You are an expert AI art director for a top-tier YouTube psychology & technology explainer channel called "The Hidden Why".
 
 Analyze the following script section and create 2 to 3 vivid, highly detailed image generation prompts (for Midjourney / Imagen / DALL-E) that visually represent the concepts in this section.
@@ -208,7 +245,7 @@ surreal/art-direction language from the prompts above (no "holographic", "neon",
 English words, nouns and actions only.
 Format that line EXACTLY like:
 STOCK FOOTAGE QUERY: [4-8 plain words]
-"""
+{scene_instructions}"""
     try:
         return call_gemini_api(system_prompt, api_key, model_id)
     except RuntimeError as gemini_err:
