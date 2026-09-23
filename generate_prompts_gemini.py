@@ -212,7 +212,17 @@ After the STOCK FOOTAGE QUERY line, add exactly {len(scene_lines)} more lines �
 filmable stock-footage query (same rules as above: plain, literal, 4-8 words, no surreal/
 art-direction language) for EACH numbered sentence, so B-roll can be matched to what's
 being said at that specific moment instead of the section as a whole. Number them to match
-the sentences exactly, one per line, in order, with no blank lines in between:
+the sentences exactly, one per line, in order, with no blank lines in between.
+
+Stock footage libraries only have real, commonly-filmed everyday moments — they do NOT have
+footage of specific unusual physical actions (e.g. "tickling", "recoiling from a jump scare",
+niche gestures). If a sentence's literal action is unlikely to exist as real stock footage,
+do NOT query that literal action — instead query a broadly-filmed proxy that carries the same
+feeling or beat: a candid reaction (laughing, flinching, surprised, thoughtful), a relevant
+everyday setting, or a simple hand/object/close-up shot. When in doubt, prefer generic,
+widely-available categories (people talking, laughing, walking, close-ups of hands or faces)
+over anything narrow enough that a real search is likely to return zero or unrelated results.
+
 SCENE 1: [4-8 plain words for sentence 1]
 SCENE 2: [4-8 plain words for sentence 2]
 (... one SCENE line per numbered sentence, ending at SCENE {len(scene_lines)})

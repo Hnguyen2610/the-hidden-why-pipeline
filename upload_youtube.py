@@ -52,7 +52,9 @@ except ImportError:
     print("Please install dependencies by running: pip install -r requirements.txt")
     sys.exit(1)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+from youtube_analytics import default_analytics_scopes
+
+SCOPES = default_analytics_scopes()
 TOKEN_FILE = "token.json"
 
 
@@ -96,6 +98,13 @@ def get_authenticated_service(client_secrets_file: str):
             print(f"[WARNING] Failed to load cached {TOKEN_FILE}: {e}")
             creds = None
 
+    if creds is not None and not hasattr(creds, "scopes"):
+        creds = None
+
+    if creds is not None and not set(SCOPES).issubset(set(creds.scopes or [])):
+        print("[INFO] Cached token is missing required scopes; re-authentication is required.")
+        creds = None
+
     # If there are no valid credentials available, ask user to log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -107,6 +116,10 @@ def get_authenticated_service(client_secrets_file: str):
                 creds = None
 
         if not creds:
+            if os.path.exists(TOKEN_FILE):
+                os.remove(TOKEN_FILE)
+                print(f"[INFO] Removed stale {TOKEN_FILE} to force a new OAuth login with the updated scopes.")
+
             if not os.path.exists(client_secrets_file):
                 # Smart fallback for Windows duplicate .json extension
                 if os.path.exists("client_secret.json.json"):

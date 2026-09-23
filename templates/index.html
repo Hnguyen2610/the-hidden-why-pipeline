@@ -33,6 +33,9 @@
         <button class="nav-item" data-tab="scripts">
           <span class="icon">🎬</span> Tạo Video
         </button>
+        <button class="nav-item" data-tab="analytics">
+          <span class="icon">📈</span> YouTube Analytics
+        </button>
         <button class="nav-item" data-tab="youtube">
           <span class="icon">🚀</span> Upload YouTube
         </button>
@@ -98,6 +101,64 @@
             <div class="metric-info">
               <span class="metric-value" id="val-videos">0</span>
               <span class="metric-label">Video MP4 Hoàn Chỉnh</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top: 18px;">
+          <div class="card-header">
+            <div>
+              <h3>📈 Tổng Quan Kênh YouTube</h3>
+              <p class="subtitle">Tổng views, subscribers, lượt thích và video có view cao nhất lấy từ tab Analytics của kênh.</p>
+            </div>
+          </div>
+
+          <div class="metrics-grid" style="margin-top: 14px;">
+            <div class="metric-card">
+              <div class="metric-icon cyan">📹</div>
+              <div class="metric-info">
+                <span class="metric-value" id="channel-total-videos">0</span>
+                <span class="metric-label">Tổng Video</span>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-icon emerald">👁️</div>
+              <div class="metric-info">
+                <span class="metric-value" id="channel-total-views">0</span>
+                <span class="metric-label">Tổng Views</span>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-icon indigo">👥</div>
+              <div class="metric-info">
+                <span class="metric-value" id="channel-total-subscribers">0</span>
+                <span class="metric-label">Subscribers</span>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-icon rose">👍</div>
+              <div class="metric-info">
+                <span class="metric-value" id="channel-total-likes">0</span>
+                <span class="metric-label">Lượt Like</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top: 14px; background:#111827; border:1px solid #1e293b;">
+            <h4 style="margin-top:0; margin-bottom:8px; color:#e2e8f0;">🏆 Video Có View Cao Nhất</h4>
+            <div id="channel-top-video" style="color:#cbd5e1; line-height:1.6; min-height:40px;">
+              Chưa có dữ liệu analytics.
+            </div>
+          </div>
+
+          <div id="channel-format-overview" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px; margin-top:14px;">
+            <div class="card" style="margin:0; background:#111827; border:1px solid #1e293b;">
+              <h4 style="margin-top:0; color:#38bdf8;">🎬 Video Thường</h4>
+              <div id="regular-video-summary" style="color:#cbd5e1; line-height:1.7;">Chưa có dữ liệu.</div>
+            </div>
+            <div class="card" style="margin:0; background:#111827; border:1px solid #1e293b;">
+              <h4 style="margin-top:0; color:#a78bfa;">📱 Shorts</h4>
+              <div id="shorts-summary" style="color:#cbd5e1; line-height:1.7;">Chưa có dữ liệu.</div>
             </div>
           </div>
         </div>
@@ -275,6 +336,10 @@
           <div id="shorts-section-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:14px; max-height:260px; overflow-y:auto; background:#0c1220; border:1px solid #1e3a5f; border-radius:8px; padding:12px;">
             <span style="color:#64748b;">Đang tải danh sách section...</span>
           </div>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+            <button class="btn btn-sm btn-secondary" type="button" onclick="recommendShortSections()">🤖 AI Đề Xuất Hook + Payoff</button>
+            <span id="short-recommendation" style="color:#94a3b8; font-size:12px;"></span>
+          </div>
           <div class="form-group" style="margin-bottom:14px;">
             <label>Tên Short (không dấu, không khoảng trắng):</label>
             <input type="text" id="short-name-input" placeholder="vd: hook_intro">
@@ -291,8 +356,51 @@
       </section>
 
 
-      <!-- TAB 3: YOUTUBE -->
+      <!-- TAB: YOUTUBE ANALYTICS -->
+      <section id="tab-analytics" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h3>📈 YouTube Analytics MVP</h3>
+              <p class="subtitle">So sánh CTR, retention và views từ dữ liệu YouTube thực tế để chọn hướng tiếp theo.</p>
+            </div>
+            <button class="btn btn-sm btn-primary" type="button" onclick="loadAnalyticsTable()">🔄 Cập Nhật Analytics</button>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap;">
+            <button class="btn btn-sm btn-primary" type="button" onclick="reauthenticateYoutube()">🔐 Đăng Nhập Lại YouTube (Reset + Xin Quyền)</button>
+            <button class="btn btn-sm btn-secondary" type="button" onclick="checkYoutubeAuthStatus()">🔎 Kiểm tra quyền hiện tại</button>
+          </div>
+          <div id="youtube-oauth-status" style="margin-top:12px; display:none; border:1px solid #f59e0b; background:#1f2937; color:#fbbf24; border-radius:8px; padding:12px 14px; font-size:13px; line-height:1.5;">
+            <strong>⏳ Đang chờ xác thực YouTube</strong><br>
+            Google login đang mở hoặc cần được hoàn tất để cấp quyền analytics và upload.
+          </div>
+          <div id="youtube-auth-info" style="margin-top:12px; display:none; border:1px solid #1e3a5f; background:#0f172a; color:#dbeafe; border-radius:8px; padding:12px 14px; font-size:13px; line-height:1.5;">
+            <strong>📎 Tài khoản YouTube đang kết nối</strong><br>
+            <span id="youtube-auth-account">-</span><br>
+            <span id="youtube-auth-channel">-</span>
+          </div>
+          <div id="analytics-table-wrap" style="margin-top:14px; overflow-x:auto;">
+            <span style="color:#64748b;">Chưa có dữ liệu analytics. Nhấn “Cập Nhật Analytics” để tải từ YouTube.</span>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- TAB: YOUTUBE UPLOAD -->
       <section id="tab-youtube" class="tab-content">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h3>🧪 Packaging Lab — Title & Thumbnail</h3>
+              <p class="subtitle">Tạo 3 hướng đóng gói khác nhau để tăng CTR. Bạn duyệt concept trước khi gọi Imagen.</p>
+            </div>
+            <button class="btn btn-sm btn-purple" type="button" onclick="generatePackaging()">🤖 Tạo 3 Concept</button>
+          </div>
+          <div id="packaging-options" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-top:14px;">
+            <span style="color:#64748b;">Chưa có concept. Nhấn “Tạo 3 Concept” để bắt đầu.</span>
+          </div>
+        </div>
+
         <div class="card">
           <h3>Upload YouTube (OAuth2 Private Default)</h3>
           <p class="subtitle">Tải video <code>final_video.mp4</code> lên YouTube. Mặc định luôn ở chế độ Riêng tư

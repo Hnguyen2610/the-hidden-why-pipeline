@@ -11,15 +11,24 @@ async function readApiResponse(response) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-    setupTabs();
-    setupConsoleResize();
-    loadProjects();
-    refreshStatus();
-    loadScripts();
-    loadPrompts();
-
-    // Auto-refresh status and log stream every 2.5s
+    // Registered first and unconditionally: a synchronous throw from any one
+    // init call below must never again be able to prevent this from running
+    // (that's exactly what an undefined loadChannelOverview() used to do —
+    // it threw before this line and silently froze all live status/log
+    // updates for the rest of the session).
     setInterval(refreshStatus, 2500);
+
+    try {
+        setupTabs();
+        setupConsoleResize();
+        loadProjects();
+        refreshStatus();
+        loadChannelOverview();
+        loadScripts();
+        loadPrompts();
+    } catch (err) {
+        console.error("Page init error (non-fatal, status polling still runs):", err);
+    }
 });
 
 function setupConsoleResize() {
@@ -97,6 +106,7 @@ async function switchProject(projectName) {
         if (res.ok) {
             clearScriptEditor();
             refreshStatus();
+            loadChannelOverview();
             loadScripts();
             loadPrompts();
         } else {
@@ -198,6 +208,7 @@ function switchTab(tabName) {
         prompts: "Tạo Video",
         video: "Tạo Video",
         shorts: "Tạo Video Short",
+        analytics: "YouTube Analytics",
         youtube: "Upload YouTube (OAuth2 Private)"
     };
     if (pageTitle && titles[tabName]) {
@@ -209,6 +220,65 @@ function switchTab(tabName) {
     if (tabName === "shorts") {
         loadShortsSections();
         loadShortsList();
+    }
+    if (tabName === "analytics") {
+        // checkYoutubeAuthStatus() already calls loadAnalyticsTable() itself
+        // once it confirms the token is connected — calling both here would
+        // just fetch analytics twice.
+        checkYoutubeAuthStatus();
+    }
+    if (tabName === "dashboard") loadChannelOverview();
+    if (tabName === "youtube") {
+        loadPackaging();
+    }
+}
+
+async function loadChannelOverview() {
+    // Populates the "Tổng Quan Kênh YouTube" dashboard card from the same
+    // /api/analytics summary the Analytics tab uses. Wrapped defensively —
+    // this runs inside DOMContentLoaded, and previously being an undefined
+    // function threw a ReferenceError there that silently killed the
+    // setInterval(refreshStatus, ...) line right after it, freezing the
+    // whole app's live status/log updates. Must never throw again.
+    try {
+        const res = await fetch("/api/analytics");
+        const data = await res.json();
+        if (!res.ok || !data.summary) {
+            return; // Not connected / no data yet — leave the dashboard placeholders as-is.
+        }
+        const s = data.summary;
+
+        const setMetric = (id, value) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = value;
+        };
+        setMetric("channel-total-videos", Number(s.total_videos || 0).toLocaleString());
+        setMetric("channel-total-views", Number(s.total_views || 0).toLocaleString());
+        setMetric("channel-total-subscribers", Number(s.total_subscribers || 0).toLocaleString());
+        setMetric("channel-total-likes", Number(s.total_likes || 0).toLocaleString());
+
+        const videoLink = (id, title, views, likes) => id
+            ? `<a href="https://youtu.be/${escapeHtml(id)}" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;">${escapeHtml(title || id)}</a> — ${Number(views || 0).toLocaleString()} views, ${Number(likes || 0).toLocaleString()} likes`
+            : "Chưa có dữ liệu analytics.";
+
+        const topVideoEl = document.getElementById("channel-top-video");
+        if (topVideoEl) {
+            topVideoEl.innerHTML = videoLink(s.top_video_id, s.top_video_title, s.top_video_views, s.top_video_likes);
+        }
+
+        const formatSummaryHtml = (fmt) => {
+            if (!fmt || !fmt.total_videos) return "Chưa có dữ liệu.";
+            const topLine = fmt.top_video_id
+                ? `<br>🏆 ${videoLink(fmt.top_video_id, fmt.top_video_title, fmt.top_video_views, fmt.top_video_likes)}`
+                : "";
+            return `${fmt.total_videos} video · ${Number(fmt.total_views || 0).toLocaleString()} views · ${Number(fmt.total_likes || 0).toLocaleString()} likes${topLine}`;
+        };
+        const regularEl = document.getElementById("regular-video-summary");
+        if (regularEl) regularEl.innerHTML = formatSummaryHtml(s.regular_videos);
+        const shortsEl = document.getElementById("shorts-summary");
+        if (shortsEl) shortsEl.innerHTML = formatSummaryHtml(s.shorts);
+    } catch (err) {
+        console.error("loadChannelOverview failed (dashboard widget only, non-fatal):", err);
     }
 }
 
@@ -594,6 +664,45 @@ async function triggerCreateShort() {
     }
 }
 
+async function recommendShortSections() {
+    const status = document.getElementById("short-recommendation");
+    const checkboxes = Array.from(document.querySelectorAll(".short-section-checkbox"));
+    if (!checkboxes.length) {
+        alert("Chưa có section nào để AI phân tích.");
+        return;
+    }
+
+    status.textContent = "AI đang phân tích hook và payoff...";
+    try {
+        const res = await fetch("/api/shorts/recommend", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}"
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            status.textContent = data.error || "Không tạo được đề xuất.";
+            return;
+        }
+
+        const selected = new Set(data.sections || []);
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = selected.has(checkbox.value);
+        });
+        const titleInput = document.getElementById("short-name-input");
+        if (titleInput && !titleInput.value.trim() && data.suggested_title) {
+            titleInput.value = data.suggested_title
+                .replace(/[^a-zA-Z0-9 _-]/g, "")
+                .trim()
+                .replace(/\s+/g, "_")
+                .toLowerCase();
+        }
+        status.textContent = `${data.sections.length} section: ${data.reason || "Đã chọn một arc ngắn gọn."}`;
+    } catch (err) {
+        status.textContent = "Lỗi kết nối khi gọi AI.";
+    }
+}
+
 async function loadShortsList() {
     const container = document.getElementById("shorts-list-container");
     if (!container) return;
@@ -661,5 +770,348 @@ async function triggerUploadYoutube() {
         }
     } catch (err) {
         alert("Lỗi: " + err);
+    }
+}
+
+async function loadAnalyticsTable() {
+    const wrap = document.getElementById("analytics-table-wrap");
+    if (!wrap) return;
+    wrap.innerHTML = '<span style="color:#38bdf8;">Đang tải dữ liệu từ YouTube Analytics...</span>';
+    try {
+        const res = await fetch("/api/analytics");
+        const data = await res.json();
+        renderChannelOverview(data.summary || {});
+        if (!res.ok || !Array.isArray(data.videos) || data.videos.length === 0) {
+            const message = data.message || "Chưa có dữ liệu analytics.";
+            // issue_type comes from the backend now (no_token / reauth / api_disabled / error);
+            // fall back to the old keyword-sniffing only for older/unexpected responses.
+            const issueType = data.issue_type || (/scope|re-auth|token|permission|403|401/i.test(message) ? "reauth" : "info");
+            const isWarning = issueType === "reauth" || issueType === "no_token" || issueType === "api_disabled";
+            const title = issueType === "api_disabled"
+                ? "⚠️ Cần bật YouTube Analytics API"
+                : (isWarning ? "⚠️ Cần re-authenticate YouTube" : "ℹ️ Trạng thái analytics");
+            const linkHtml = data.enable_url
+                ? `<br><a href="${escapeHtml(data.enable_url)}" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;">${escapeHtml(data.enable_url)}</a>`
+                : "";
+            wrap.innerHTML = `
+                <div style="padding:12px 14px; border-radius:8px; border:1px solid ${isWarning ? '#f59e0b' : '#334155'}; background:${isWarning ? '#1f2937' : '#0f172a'}; color:${isWarning ? '#fbbf24' : '#cbd5e1'}; font-size:13px; line-height:1.5;">
+                    <strong>${title}</strong><br>
+                    ${escapeHtml(message)}${linkHtml}
+                </div>
+            `;
+            return;
+        }
+
+        const rows = data.videos.map((video, idx) => {
+            const url = video.url || (video.video_id ? `https://youtu.be/${video.video_id}` : "");
+            const titleHtml = url
+                ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" style="color:#38bdf8;">${escapeHtml(video.title || video.video_id)}</a>`
+                : escapeHtml(video.title || video.video_id);
+            // No official "is this a Short" flag exists via the API — duration
+            // <=180s is the closest available proxy (YouTube's own Shorts cutoff).
+            const isLikelyShort = video.duration_seconds > 0 && video.duration_seconds <= 180;
+            const formatTag = video.duration_label
+                ? `<span style="color:${isLikelyShort ? '#a78bfa' : '#64748b'}; font-size:11px;">${video.duration_label}${isLikelyShort ? ' · Short?' : ''}</span>`
+                : "";
+            return `
+            <tr>
+                <td>${idx + 1}</td>
+                <td>
+                    ${titleHtml}<br>
+                    <code style="color:#64748b; font-size:11px;">${escapeHtml(video.video_id)}</code>
+                </td>
+                <td>${formatTag}</td>
+                <td>${Number(video.views || 0).toLocaleString()}</td>
+                <td>${Number(video.retention_pct || 0).toFixed(1)}%</td>
+                <td>${Number(video.watch_minutes || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                <td>${Number(video.avg_view_seconds || 0).toFixed(0)}s</td>
+                <td>${Number(video.likes || 0).toLocaleString()}</td>
+                <td>${Number(video.comments || 0).toLocaleString()}</td>
+                <td>${Number(video.shares || 0).toLocaleString()}</td>
+            </tr>
+        `;
+        }).join("");
+
+        wrap.innerHTML = `
+            <table style="width:100%; border-collapse:collapse; color:#e2e8f0;">
+                <thead>
+                    <tr style="background:#111827; text-align:left;">
+                        <th style="padding:8px;">#</th>
+                        <th style="padding:8px;">Video</th>
+                        <th style="padding:8px;">Thời lượng</th>
+                        <th style="padding:8px;">Views</th>
+                        <th style="padding:8px;">Retention</th>
+                        <th style="padding:8px;">Watch time (ph)</th>
+                        <th style="padding:8px;">Avg view</th>
+                        <th style="padding:8px;">Likes</th>
+                        <th style="padding:8px;">Comments</th>
+                        <th style="padding:8px;">Shares</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+            <p style="color:#64748b; font-size:11px; margin-top:8px;">
+                Impressions/CTR không hiển thị — YouTube Analytics API (reports.query) không hỗ trợ 2 metric này
+                (khác với số liệu bạn thấy trong YouTube Studio, vốn lấy từ hệ thống báo cáo khác).
+                "Short?" chỉ là suy đoán theo thời lượng ≤3 phút — API không có cờ chính thức phân biệt Shorts.
+            </p>
+        `;
+    } catch (err) {
+        wrap.innerHTML = '<span style="color:#f87171;">Lỗi tải analytics: ' + escapeHtml(String(err)) + '</span>';
+    }
+}
+
+function renderChannelOverview(summary) {
+    const ids = {
+        videos: "channel-total-videos",
+        views: "channel-total-views",
+        subscribers: "channel-total-subscribers",
+        likes: "channel-total-likes",
+    };
+
+    const safeNumber = (value, fallback = 0) => {
+        const num = Number(value ?? fallback);
+        return Number.isFinite(num) ? num : fallback;
+    };
+
+    const videosEl = document.getElementById(ids.videos);
+    const viewsEl = document.getElementById(ids.views);
+    const subscribersEl = document.getElementById(ids.subscribers);
+    const likesEl = document.getElementById(ids.likes);
+    const topVideoEl = document.getElementById("channel-top-video");
+
+    if (videosEl) videosEl.textContent = safeNumber(summary.total_videos, 0).toLocaleString();
+    if (viewsEl) viewsEl.textContent = safeNumber(summary.total_views, 0).toLocaleString();
+    if (subscribersEl) subscribersEl.textContent = safeNumber(summary.total_subscribers, 0).toLocaleString();
+    if (likesEl) likesEl.textContent = safeNumber(summary.total_likes, 0).toLocaleString();
+
+    if (topVideoEl) {
+        const videoId = summary.top_video_id || "";
+        const title = summary.top_video_title || (videoId ? `Video ${videoId}` : "Chưa có video nào");
+        const views = safeNumber(summary.top_video_views, 0);
+        const likes = safeNumber(summary.top_video_likes, 0);
+
+        if (videoId) {
+            topVideoEl.innerHTML = `
+                <strong style="color:#f8fafc;">${escapeHtml(title)}</strong><br>
+                <span>Views: <strong>${views.toLocaleString()}</strong></span><br>
+                <span>Likes: <strong>${likes.toLocaleString()}</strong></span>
+            `;
+        } else {
+            topVideoEl.textContent = "Chưa có dữ liệu analytics cho video có view cao nhất.";
+        }
+    }
+
+    renderFormatSummary("regular-video-summary", summary.regular_videos, "Chưa có video thường trong dữ liệu analytics.");
+    renderFormatSummary("shorts-summary", summary.shorts, "Chưa có Short trong dữ liệu analytics.");
+}
+
+function renderFormatSummary(elementId, formatSummary, emptyMessage) {
+    const element = document.getElementById(elementId);
+    if (!element) return;
+
+    const data = formatSummary || {};
+    const videoCount = Number(data.total_videos || 0);
+    if (!videoCount) {
+        element.textContent = emptyMessage;
+        return;
+    }
+
+    const title = data.top_video_title || data.top_video_id || "Không xác định";
+    element.innerHTML = `
+        <div>Số video: <strong>${videoCount.toLocaleString()}</strong></div>
+        <div>Tổng views: <strong>${Number(data.total_views || 0).toLocaleString()}</strong></div>
+        <div>Tổng likes: <strong>${Number(data.total_likes || 0).toLocaleString()}</strong></div>
+        <div>Video cao nhất: <strong>${escapeHtml(title)}</strong> (${Number(data.top_video_views || 0).toLocaleString()} views)</div>
+    `;
+}
+
+async function reauthenticateYoutube() {
+    if (!confirm("Đăng nhập lại YouTube: xoá token cũ rồi mở Google login để xin đủ quyền (bao gồm yt-analytics.readonly)?")) {
+        return;
+    }
+
+    showYoutubeOAuthStatus(true);
+
+    try {
+        const resetRes = await fetch("/api/youtube/auth/reset", { method: "POST" });
+        const resetText = await resetRes.text();
+        let resetData = {};
+        try {
+            resetData = resetText ? JSON.parse(resetText) : {};
+        } catch {
+            alert("Lỗi reset OAuth: Server trả về HTML thay vì JSON.\nChi tiết: " + resetText.slice(0, 180));
+            showYoutubeOAuthStatus(false);
+            return;
+        }
+
+        if (!resetRes.ok) {
+            alert("Lỗi reset OAuth: " + (resetData.error || resetData.message || "Unknown"));
+            showYoutubeOAuthStatus(false);
+            return;
+        }
+
+        const loginRes = await fetch("/api/youtube/auth/login", { method: "POST" });
+        const loginText = await loginRes.text();
+        let loginData = {};
+        try {
+            loginData = loginText ? JSON.parse(loginText) : {};
+        } catch {
+            alert("Lỗi mở OAuth flow: Server trả về HTML thay vì JSON.\nChi tiết: " + loginText.slice(0, 180));
+            showYoutubeOAuthStatus(false);
+            return;
+        }
+
+        if (!loginRes.ok) {
+            alert("Lỗi mở OAuth flow: " + (loginData.error || loginData.message || "Unknown"));
+            showYoutubeOAuthStatus(false);
+            return;
+        }
+
+        alert((resetData.message || "Token đã được reset.") + "\n" + (loginData.message || "Đang mở Google login..."));
+        loadAnalyticsTable();
+    } catch (err) {
+        alert("Lỗi reset OAuth: " + (err && err.message ? err.message : String(err)));
+        showYoutubeOAuthStatus(false);
+    }
+}
+
+function showYoutubeOAuthStatus(show) {
+    const status = document.getElementById("youtube-oauth-status");
+    if (!status) return;
+    status.style.display = show ? "block" : "none";
+}
+
+function renderYoutubeAuthInfo(data) {
+    const panel = document.getElementById("youtube-auth-info");
+    const accountEl = document.getElementById("youtube-auth-account");
+    const channelEl = document.getElementById("youtube-auth-channel");
+    if (!panel || !accountEl || !channelEl) return;
+
+    if (!data || !data.connected) {
+        panel.style.display = "block";
+        accountEl.textContent = "Tài khoản: chưa kết nối";
+        channelEl.textContent = data && data.message ? data.message : "Cần đăng nhập lại.";
+        return;
+    }
+
+    panel.style.display = "block";
+    accountEl.textContent = "Tài khoản: " + (data.account || "Google account connected");
+    channelEl.textContent = "Kênh: " + (data.channel || "Không xác định được kênh hiện tại");
+}
+
+async function checkYoutubeAuthStatus() {
+    try {
+        const res = await fetch("/api/youtube/auth/status");
+        const text = await res.text();
+        let data = {};
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch {
+            const msg = text.slice(0, 240).replace(/\s+/g, " ");
+            showYoutubeOAuthStatus(true);
+            const status = document.getElementById("youtube-oauth-status");
+            if (status) {
+                status.innerHTML = `<strong>⚠️ Không kiểm tra được quyền YouTube</strong><br>SyntaxError: Unexpected token '<', "${escapeHtml(msg)}" is not valid JSON`;
+            }
+            return;
+        }
+
+        renderYoutubeAuthInfo(data);
+        if (!data.connected) {
+            showYoutubeOAuthStatus(true);
+            const msg = data.message || "Cần xác thực lại.";
+            document.getElementById("youtube-oauth-status").innerHTML = `<strong>⚠️ YouTube chưa sẵn sàng</strong><br>${escapeHtml(msg)}`;
+            return;
+        }
+        showYoutubeOAuthStatus(false);
+        await loadAnalyticsTable();
+    } catch (err) {
+        showYoutubeOAuthStatus(true);
+        const status = document.getElementById("youtube-oauth-status");
+        if (status) status.innerHTML = `<strong>⚠️ Không kiểm tra được quyền YouTube</strong><br>${escapeHtml(String(err))}`;
+    }
+}
+
+async function loadPackaging() {
+    const container = document.getElementById("packaging-options");
+    if (!container) return;
+    try {
+        const res = await fetch("/api/packaging");
+        const data = await res.json();
+        renderPackaging(data.packages || []);
+    } catch (err) {
+        container.innerHTML = '<span style="color:#f87171;">Lỗi tải packaging options.</span>';
+    }
+}
+
+function renderPackaging(packages) {
+    const container = document.getElementById("packaging-options");
+    if (!container) return;
+    if (!packages.length) {
+        container.innerHTML = '<span style="color:#64748b;">Chưa có concept. Nhấn “Tạo 3 Concept” để bắt đầu.</span>';
+        return;
+    }
+    container.innerHTML = packages.map((item, index) => `
+        <article style="background:#0c1220; border:1px solid #1e3a5f; border-radius:8px; padding:12px;">
+            <strong style="color:#38bdf8;">Concept ${index + 1}</strong>
+            <h4 style="margin:8px 0;">${escapeHtml(item.title)}</h4>
+            <p style="color:#cbd5e1; font-size:12px; margin-bottom:8px;">${escapeHtml(item.angle)}</p>
+            <div style="color:#fbbf24; font-weight:700; margin-bottom:8px;">Thumbnail: “${escapeHtml(item.thumbnail_text)}”</div>
+            <p style="color:#94a3b8; font-size:12px; margin-bottom:10px;">${escapeHtml(item.description_opening)}</p>
+            <button class="btn btn-sm btn-primary" type="button" onclick="usePackagingTitle(${index})">Dùng title này</button>
+            <button class="btn btn-sm btn-secondary" type="button" onclick="generatePackagingThumbnail(${index})">🖼️ Tạo Thumbnail</button>
+        </article>
+    `).join("");
+}
+
+function escapeHtml(value) {
+    return String(value || "").replace(/[&<>'"]/g, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+    })[character]);
+}
+
+function usePackagingTitle(index) {
+    const title = document.querySelectorAll("#packaging-options article h4")[index]?.textContent;
+    const titleInput = document.getElementById("yt-title");
+    if (title && titleInput) {
+        titleInput.value = title;
+        titleInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+}
+
+async function generatePackaging() {
+    const container = document.getElementById("packaging-options");
+    container.innerHTML = '<span style="color:#38bdf8;">Gemini đang tạo title và thumbnail concepts...</span>';
+    try {
+        const res = await fetch("/api/packaging/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}"
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            container.innerHTML = `<span style="color:#f87171;">${escapeHtml(data.error)}</span>`;
+            return;
+        }
+        renderPackaging(data.packages || []);
+    } catch (err) {
+        container.innerHTML = '<span style="color:#f87171;">Lỗi kết nối khi tạo packaging.</span>';
+    }
+}
+
+async function generatePackagingThumbnail(index) {
+    try {
+        const res = await fetch("/api/packaging/thumbnail", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ index })
+        });
+        const data = await res.json();
+        alert(res.ok ? "🖼️ " + data.message : "Lỗi: " + data.error);
+    } catch (err) {
+        alert("Lỗi tạo thumbnail: " + err);
     }
 }

@@ -473,8 +473,25 @@ def main():
 
             # Probed once and reused for subtitle timing, the clip playlist, and the
             # explicit '-t' cutoff below (see note there on why '-shortest' alone
-            # isn't reliable).
+            # isn't reliable). Every section gets a bit of trailing silence so the
+            # gap between sections is deterministic instead of however long that
+            # particular TTS render happened to trail off for (which varied a lot
+            # section to section) — the final section gets a longer one so the
+            # video doesn't end abruptly.
             audio_duration = get_audio_duration_seconds(audio_path)
+            if visual_type == "scenes" and visual_paths:
+                # Speech timing intentionally excludes leading/trailing silence.
+                # Extend the first/last scene to the full audio window so the
+                # renderer does not freeze the final frame while waiting for audio.
+                visual_paths[0]["start"] = 0.0
+                visual_paths[-1]["end"] = audio_duration
+            is_last_segment = idx == len(mp3_files) - 1
+            tail_padding_seconds = 1.0 if is_last_segment else 0.4
+            segment_duration = audio_duration + tail_padding_seconds
+            audio_filter = "loudnorm=I=-16:TP=-1.5:LRA=11"
+            if tail_padding_seconds:
+                audio_filter += f",apad=pad_dur={tail_padding_seconds}"
+            shortest_args = [] if tail_padding_seconds else ["-shortest"]
 
             subtitle_expr = ""
             if burn_subtitles:
@@ -506,7 +523,7 @@ def main():
                 # (repeats a single clip if that's all we have — same end result as the
                 # old '-stream_loop -1', just expressed as repeated inputs so it can be
                 # concatenated and have subtitles burned into the combined output).
-                playlist = build_clip_playlist(visual_paths, audio_duration)
+                playlist = build_clip_playlist(visual_paths, segment_duration)
 
                 inputs = []
                 for p in playlist:
@@ -532,6 +549,11 @@ def main():
                 if subtitle_expr:
                     filter_parts.append(f"[vcat]{subtitle_expr}[vout]")
                     final_label = "vout"
+                if tail_padding_seconds:
+                    filter_parts.append(
+                        f"[{final_label}]tpad=stop_mode=clone:stop_duration={tail_padding_seconds}[vpadded]"
+                    )
+                    final_label = "vpadded"
 
                 cmd = [
                     FFMPEG_PATH,
@@ -542,15 +564,16 @@ def main():
                     "-map", f"{audio_input_idx}:a:0",
                     "-c:v", "libx264",
                     "-preset", "fast",
+                    "-af", audio_filter,
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-pix_fmt", "yuv420p",
-                    "-shortest",              # safety net
-                    "-t", str(audio_duration),  # '-shortest' alone can overshoot by 1-2s with
+                    *shortest_args,            # safety net for non-final segments
+                    "-t", str(segment_duration),  # '-shortest' alone can overshoot by 1-2s with
                                                  # this filter graph (confirmed by testing) — an
                                                  # explicit hard cutoff is what actually keeps
-                                                 # segment length == audio length, which subtitle
-                                                 # sync depends on for every section after this one.
+                                                 # segment length == its target duration, which
+                                                 # subtitle sync depends on for every section.
                     segment_path,
                 ]
             elif visual_type == "scenes":
@@ -568,6 +591,12 @@ def main():
                 inputs = []
                 filter_parts = []
                 concat_labels = ""
+                scene_visual_duration = sum(
+                    max(0.1, scene["end"] - scene["start"]) for scene in visual_paths
+                )
+                scene_tail_padding = max(
+                    0.0, segment_duration - scene_visual_duration + 0.1
+                ) if tail_padding_seconds else 0.0
                 for i, scene in enumerate(visual_paths):
                     scene_duration = max(0.1, scene["end"] - scene["start"])
                     inputs += ["-stream_loop", "-1", "-i", scene["clip"]]
@@ -584,6 +613,11 @@ def main():
                 if subtitle_expr:
                     filter_parts.append(f"[vcat]{subtitle_expr}[vout]")
                     final_label = "vout"
+                if scene_tail_padding:
+                    filter_parts.append(
+                        f"[{final_label}]tpad=stop_mode=clone:stop_duration={scene_tail_padding:.3f}[vpadded]"
+                    )
+                    final_label = "vpadded"
 
                 cmd = [
                     FFMPEG_PATH,
@@ -594,11 +628,12 @@ def main():
                     "-map", f"{audio_input_idx}:a:0",
                     "-c:v", "libx264",
                     "-preset", "fast",
+                    "-af", audio_filter,
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-pix_fmt", "yuv420p",
-                    "-shortest",
-                    "-t", str(audio_duration),
+                    *shortest_args,
+                    "-t", str(segment_duration),
                     segment_path,
                 ]
             else:
@@ -613,14 +648,14 @@ def main():
                     "-vf", f"scale={video_w}:{video_h}:force_original_aspect_ratio=increase,crop={video_w}:{video_h},zoompan=z='min(zoom+0.0008,1.25)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={video_w}x{video_h}:fps=25" + subtitle_suffix,
                     "-c:v", "libx264",
                     "-preset", "fast",
+                    "-af", audio_filter,
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-pix_fmt", "yuv420p",
-                    "-shortest",
-                    "-t", str(audio_duration),
+                    *shortest_args,
+                    "-t", str(segment_duration),
                     segment_path,
                 ]
-
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res.returncode != 0:
                 print("FAILED!")
@@ -629,32 +664,48 @@ def main():
 
             print("DONE!")
 
-        # Concatenate all segment videos
-        concat_list_path = os.path.join(output_dir, "_concat_list.txt")
-        with open(concat_list_path, "w", encoding="utf-8") as f:
-            for seg in temp_segments:
-                # Format file path for FFmpeg concat demuxer
-                escaped = os.path.abspath(seg).replace("\\", "/")
-                f.write(f"file '{escaped}'\n")
-
         print("-" * 65)
         print("[CONCATENATING] Assembling all segments into final MP4 video... ", end="", flush=True)
 
-        concat_cmd = [
-            FFMPEG_PATH,
-            "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_list_path,
-            "-c", "copy",
-            final_video_path,
-        ]
+        if len(temp_segments) == 1:
+            # Single section — nothing to concatenate, just place it directly.
+            shutil.copy(temp_segments[0], final_video_path)
+        else:
+            # Built with the concat FILTER (decodes + re-encodes) rather than the
+            # concat DEMUXER + '-c copy'. Confirmed by testing: with these scene
+            # segments' B-frame timestamp patterns, demuxer+copy silently wrote a
+            # wildly wrong duration into the MP4 container metadata (48 minutes
+            # for ~38 seconds of actual playable content) even though ffmpeg's
+            # own copy progress line reported the correct length — the demuxer
+            # mis-derives the container duration from non-monotonic DTS across
+            # file boundaries. The filter operates on decoded frames instead of
+            # raw packets, so it can't inherit that cross-file DTS confusion.
+            inputs = []
+            for seg in temp_segments:
+                inputs += ["-i", seg]
+            concat_labels = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(len(temp_segments)))
+            filter_complex = f"{concat_labels}concat=n={len(temp_segments)}:v=1:a=1[vout][aout]"
 
-        res = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode != 0:
-            print("FAILED!")
-            print(f"[ERROR] FFmpeg concatenation failed:\n{res.stderr.decode('utf-8', errors='ignore')}")
-            sys.exit(1)
+            concat_cmd = [
+                FFMPEG_PATH,
+                "-y",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-map", "[aout]",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                final_video_path,
+            ]
+
+            res = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode != 0:
+                print("FAILED!")
+                print(f"[ERROR] FFmpeg concatenation failed:\n{res.stderr.decode('utf-8', errors='ignore')}")
+                sys.exit(1)
 
         print("DONE!")
 
@@ -672,12 +723,6 @@ def main():
                     os.remove(srt)
                 except Exception:
                     pass
-        concat_list_p = os.path.join(output_dir, "_concat_list.txt")
-        if os.path.exists(concat_list_p):
-            try:
-                os.remove(concat_list_p)
-            except Exception:
-                pass
 
     video_size_mb = os.path.getsize(final_video_path) / (1024 * 1024)
     print("=" * 65)

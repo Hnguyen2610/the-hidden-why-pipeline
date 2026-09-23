@@ -27,6 +27,15 @@ except ImportError:
     pass
 
 from generate_prompts_gemini import call_gemini_api
+from generate_images_gemini import generate_image_from_prompt
+from youtube_analytics import (
+    attach_video_titles,
+    default_analytics_scopes,
+    fetch_video_analytics,
+    has_required_scopes,
+    parse_iso8601_duration,
+    summarize_channel_overview,
+)
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config['TEMPLATES_AUTO_RELOAD'] = True
@@ -104,6 +113,10 @@ def get_footage_dir() -> str:
 
 def get_video_dir() -> str:
     return get_proj_subdir("video")
+
+
+def get_packaging_path() -> str:
+    return os.path.join(get_active_proj_dir(), "packaging.json")
 
 
 def is_vertical_project() -> bool:
@@ -693,6 +706,286 @@ def retry_video_pipeline():
     return jsonify({"message": f"Đang retry bước {pipeline_state['failed_stage']} và các bước tiếp theo."})
 
 
+@app.route("/api/analytics", methods=["GET"])
+def get_analytics():
+    """Return a simple YouTube analytics comparison table for the active channel."""
+    scope_list = default_analytics_scopes()
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+
+        token_path = os.path.join(BASE_DIR, "token.json")
+        if not os.path.exists(token_path):
+            return jsonify({"videos": [], "issue_type": "no_token", "message": "No YouTube OAuth token yet. Re-authenticate in the upload flow."})
+
+        creds = Credentials.from_authorized_user_file(token_path, scope_list)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                return jsonify({"videos": [], "issue_type": "reauth", "message": "Token invalid or expired. Re-authenticate with the new analytics scope."})
+
+        if not has_required_scopes(creds):
+            return jsonify({"videos": [], "issue_type": "reauth", "message": "Token is missing the required YouTube scopes. Please re-authenticate to grant yt-analytics.readonly and youtube.upload."})
+
+        service = build("youtubeAnalytics", "v2", credentials=creds)
+        videos = fetch_video_analytics(service, max_results=25, start_days=30)
+
+        titles_by_id = {}
+        durations_by_id = {}
+        video_ids = [v["video_id"] for v in videos if v.get("video_id")]
+        if video_ids:
+            try:
+                yt_service = build("youtube", "v3", credentials=creds)
+                resp = yt_service.videos().list(part="snippet,contentDetails", id=",".join(video_ids)).execute()
+                for item in resp.get("items", []):
+                    titles_by_id[item["id"]] = item.get("snippet", {}).get("title", "")
+                    raw_duration = item.get("contentDetails", {}).get("duration", "")
+                    durations_by_id[item["id"]] = parse_iso8601_duration(raw_duration)
+            except Exception:
+                pass  # Titles/duration are a nice-to-have — show raw ids rather than fail the whole table.
+        videos = attach_video_titles(videos, titles_by_id, durations_by_id)
+
+        channel_stats = {}
+        try:
+            yt_service = build("youtube", "v3", credentials=creds)
+            channel_resp = yt_service.channels().list(part="statistics,snippet", mine=True).execute()
+            channel = (channel_resp.get("items") or [{}])[0]
+            stats = channel.get("statistics", {}) or {}
+            channel_stats = {
+                "viewCount": stats.get("viewCount", 0),
+                "subscriberCount": stats.get("subscriberCount", 0),
+                "videoCount": stats.get("videoCount", len(videos)),
+            }
+        except Exception:
+            channel_stats = {}
+
+        summary = summarize_channel_overview(videos, channel_stats)
+
+        return jsonify({"videos": videos, "summary": summary})
+    except PermissionError as exc:
+        return jsonify({
+            "videos": [],
+            "issue_type": getattr(exc, "issue_type", "reauth"),
+            "message": str(exc),
+            "enable_url": getattr(exc, "enable_url", ""),
+        }), 403
+    except Exception as exc:
+        return jsonify({"videos": [], "issue_type": "error", "message": f"Analytics unavailable: {exc}"}), 500
+
+
+@app.route("/api/youtube/auth/reset", methods=["POST"])
+def reset_youtube_auth():
+    """Delete expired/stale token evidence so the next login requests the new analytics scope."""
+    token_path = os.path.join(BASE_DIR, "token.json")
+    if os.path.exists(token_path):
+        os.remove(token_path)
+    return jsonify({"message": "YouTube OAuth token was reset. Re-authenticate to grant the new required scopes."})
+
+
+@app.route("/api/youtube/auth/login", methods=["POST"])
+def start_youtube_auth_login():
+    """Start the browser-based Google OAuth flow using the standard local server callback flow."""
+    def worker():
+        try:
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            from youtube_analytics import default_analytics_scopes
+
+            client_secret = os.path.join(BASE_DIR, "client_secret.json")
+            if not os.path.exists(client_secret):
+                add_log("[SYSTEM] OAuth failed: client_secret.json not found.", "error")
+                return
+
+            add_log("[SYSTEM] Starting YouTube OAuth re-authentication in the browser...", "info")
+            flow = InstalledAppFlow.from_client_secrets_file(client_secret, default_analytics_scopes())
+            creds = flow.run_local_server(port=0)
+
+            with open(os.path.join(BASE_DIR, "token.json"), "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+
+            add_log("[SYSTEM] YouTube OAuth login completed successfully.", "success")
+        except Exception as exc:
+            add_log(f"[SYSTEM] YouTube OAuth login failed: {exc}", "error")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({
+        "message": "YouTube OAuth login flow started. Complete the Google authorization window that opens in your browser."
+    })
+
+
+@app.route("/api/youtube/auth/status", methods=["GET"])
+def youtube_auth_status():
+    """Return the connected Google account and current OAuth scope status."""
+    token_path = os.path.join(BASE_DIR, "token.json")
+    if not os.path.exists(token_path):
+        return jsonify({
+            "connected": False,
+            "message": "No YouTube OAuth token yet. Re-authenticate to grant the required permissions.",
+            "scopes": [],
+            "account": None,
+            "channel": None,
+        })
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        from youtube_analytics import default_analytics_scopes, has_required_scopes
+
+        creds = Credentials.from_authorized_user_file(token_path, default_analytics_scopes())
+        scopes = list(getattr(creds, "scopes", []) or [])
+        payload = {
+            "connected": bool(creds and getattr(creds, "valid", False)),
+            "message": "YouTube OAuth is active.",
+            "scopes": scopes,
+            "account": None,
+            "channel": None,
+        }
+
+        if not has_required_scopes(creds):
+            payload["connected"] = False
+            payload["message"] = "YouTube OAuth token is missing required scopes. Please re-authenticate."
+            return jsonify(payload)
+
+        try:
+            oauth_service = build("oauth2", "v2", credentials=creds)
+            userinfo = oauth_service.userinfo().get().execute()
+            payload["account"] = userinfo.get("email") or userinfo.get("name")
+        except Exception:
+            payload["account"] = "Google account detected"
+
+        try:
+            yt_service = build("youtube", "v3", credentials=creds)
+            channels = yt_service.channels().list(part="snippet", mine=True).execute()
+            items = channels.get("items") or []
+            if items:
+                payload["channel"] = items[0].get("snippet", {}).get("title")
+        except Exception:
+            payload["channel"] = None
+
+        return jsonify(payload)
+    except Exception as exc:
+        return jsonify({
+            "connected": False,
+            "message": str(exc),
+            "scopes": [],
+            "account": None,
+            "channel": None,
+        }), 500
+
+
+@app.route("/api/packaging", methods=["GET"])
+def get_packaging():
+    path = get_packaging_path()
+    if not os.path.exists(path):
+        return jsonify({"packages": []})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return jsonify(json.load(f))
+    except (OSError, json.JSONDecodeError):
+        return jsonify({"packages": []})
+
+
+@app.route("/api/packaging/generate", methods=["POST"])
+def generate_packaging():
+    """Generate several title/thumbnail packages for the active project's script."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "Chưa cấu hình GEMINI_API_KEY để tạo title/thumbnail."}), 400
+
+    script_dir = get_script_dir()
+    script_files = sorted(
+        [f for f in os.listdir(script_dir) if f.endswith(".txt") and not f.endswith(".example.txt")],
+        key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)],
+    )
+    if not script_files:
+        return jsonify({"error": "Chưa có kịch bản để tạo title/thumbnail."}), 400
+
+    script_blocks = []
+    for filename in script_files:
+        with open(os.path.join(script_dir, filename), "r", encoding="utf-8") as f:
+            script_blocks.append(f"SECTION {filename}:\n{f.read().strip()}")
+    script_text = "\n\n".join(script_blocks)
+    prompt = f"""You are a YouTube packaging strategist for a psychology and technology explainer channel.
+Create three genuinely different packaging options for the script below.
+Optimize for click-through rate without misleading clickbait.
+Each option must include:
+- a concise YouTube title (preferably under 65 characters)
+- the curiosity angle
+- thumbnail text of 2 to 5 words, not a sentence and not repeating the title
+- a detailed 16:9 thumbnail image prompt with one clear focal subject, strong contrast, and empty space for text; do not render any text in the image
+- a one-sentence description opening
+
+Return ONLY this JSON object:
+{{"packages":[{{"title":"...","angle":"...","thumbnail_text":"...","image_prompt":"...","description_opening":"..."}}]}}
+
+Script:
+{script_text}"""
+
+    try:
+        result = _parse_json_object(call_gemini_api(prompt, api_key, "gemini-3.5-flash")) or {}
+        packages = result.get("packages")
+        if not isinstance(packages, list):
+            raise ValueError("Gemini did not return packages")
+        cleaned = []
+        for package in packages[:3]:
+            if not isinstance(package, dict):
+                continue
+            required = ("title", "angle", "thumbnail_text", "image_prompt", "description_opening")
+            if all(isinstance(package.get(key), str) and package[key].strip() for key in required):
+                cleaned.append({key: package[key].strip()[:1000] for key in required})
+        if not cleaned:
+            raise ValueError("Gemini returned no valid packaging options")
+    except Exception as e:
+        add_log(f"Packaging generation failed: {e}", "warning")
+        return jsonify({"error": "Không tạo được bộ title/thumbnail hợp lệ."}), 502
+
+    payload = {"packages": cleaned}
+    with open(get_packaging_path(), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return jsonify(payload)
+
+
+@app.route("/api/packaging/thumbnail", methods=["POST"])
+def generate_packaging_thumbnail():
+    data = request.json or {}
+    raw_index = data.get("index")
+    if not isinstance(raw_index, (int, str)):
+        return jsonify({"error": "Thiếu số thứ tự concept thumbnail."}), 400
+    try:
+        package_index = int(raw_index)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Thiếu số thứ tự concept thumbnail."}), 400
+
+    path = get_packaging_path()
+    if not os.path.exists(path):
+        return jsonify({"error": "Hãy tạo bộ title/thumbnail trước."}), 400
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            packages = json.load(f).get("packages", [])
+        package = packages[package_index]
+        prompt = package["image_prompt"]
+    except (OSError, json.JSONDecodeError, IndexError, KeyError, TypeError):
+        return jsonify({"error": "Concept thumbnail không hợp lệ."}), 400
+
+    output_name = f"thumbnail_{package_index + 1:02d}.png"
+    output_path = os.path.join(get_images_dir(), output_name)
+    proj_name = ACTIVE_PROJECT
+
+    def worker():
+        add_log(f"[{proj_name}] Generating {output_name} with Imagen...", "info")
+        try:
+            image_bytes = generate_image_from_prompt(prompt, os.getenv("GEMINI_API_KEY", ""))
+            with open(output_path, "wb") as f:
+                f.write(image_bytes)
+            add_log(f"[{proj_name}] Thumbnail ready: {output_name}", "success")
+        except Exception as e:
+            add_log(f"[{proj_name}] Thumbnail generation failed: {e}", "error")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"message": f"Đang tạo {output_name} bằng Imagen.", "filename": output_name})
+
+
 @app.route("/api/shorts/sections", methods=["GET"])
 def list_shorts_sections():
     """Sections in the active project that already have generated audio (and
@@ -712,6 +1005,80 @@ def list_shorts_sections():
         for name in section_names
     ]
     return jsonify({"sections": sections})
+
+
+def _parse_json_object(raw_text: str):
+    """Parse a JSON object even when the model wraps it in a markdown fence."""
+    match = re.search(r'\{.*\}', raw_text or "", re.DOTALL)
+    if not match:
+        return None
+    try:
+        value = json.loads(match.group(0))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+@app.route("/api/shorts/recommend", methods=["POST"])
+def recommend_short_sections():
+    """Ask Gemini to select an ordered, compact hook/payoff subset for a Short."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "Chưa cấu hình GEMINI_API_KEY để AI chọn section."}), 400
+
+    audio_dir = get_audio_dir()
+    script_dir = get_script_dir()
+    available = sorted(
+        (os.path.splitext(f)[0] for f in os.listdir(audio_dir) if f.endswith(".mp3")),
+        key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)],
+    )
+    scripts = []
+    for name in available:
+        script_path = os.path.join(script_dir, f"{name}.txt")
+        if os.path.exists(script_path):
+            with open(script_path, "r", encoding="utf-8") as f:
+                scripts.append({"name": name, "text": f.read().strip()})
+
+    if not scripts:
+        return jsonify({"error": "Chưa có section nào có cả audio và kịch bản."}), 400
+
+    script_context = "\n\n".join(
+        f"SECTION {item['name']}:\n{item['text']}" for item in scripts
+    )
+    prompt = f"""You are an expert short-form video editor.
+Select the strongest consecutive-or-nonconsecutive sections from this existing narration to make one coherent YouTube Short.
+Prioritize: an immediate hook, escalating curiosity or tension, and a satisfying payoff.
+Do not rewrite the narration. Select 2 to 5 section names only from the allowed list.
+Preserve the original narrative order. Prefer a total spoken duration of roughly 20 to 90 seconds.
+Do not select a section just because it is early; select the strongest story arc.
+
+Allowed sections and narration:
+{script_context}
+
+Respond with ONLY this JSON object:
+{{"sections":["exact_section_name"],"reason":"brief explanation","suggested_title":"short title"}}"""
+
+    try:
+        raw = call_gemini_api(prompt, api_key, "gemini-3.5-flash")
+        result = _parse_json_object(raw)
+        selected = result.get("sections") if result else None
+        allowed = set(available)
+        if not isinstance(selected, list) or not selected:
+            raise ValueError("Gemini did not return a section list")
+        selected = [name for name in selected if isinstance(name, str) and name in allowed]
+        selected = sorted(set(selected), key=available.index)
+        if not selected:
+            raise ValueError("Gemini returned no valid section names")
+        result = result or {}
+    except Exception as e:
+        add_log(f"AI Short recommendation failed: {e}", "warning")
+        return jsonify({"error": "AI không tạo được đề xuất hợp lệ. Bạn có thể chọn section thủ công."}), 502
+
+    return jsonify({
+        "sections": selected,
+        "reason": str(result.get("reason", ""))[:500],
+        "suggested_title": str(result.get("suggested_title", ""))[:120],
+    })
 
 
 @app.route("/api/shorts/create", methods=["POST"])
